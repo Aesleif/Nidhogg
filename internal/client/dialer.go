@@ -111,13 +111,8 @@ func (c *tunnelConn) Close() error {
 	return rErr
 }
 
-func (c *tunnelConn) LocalAddr() net.Addr                { return dummyAddr{} }
-func (c *tunnelConn) RemoteAddr() net.Addr               { return dummyAddr{} }
+func (c *tunnelConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (c *tunnelConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
 func (c *tunnelConn) SetDeadline(_ time.Time) error      { return nil }
 func (c *tunnelConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *tunnelConn) SetWriteDeadline(_ time.Time) error { return nil }
-
-type dummyAddr struct{}
-
-func (dummyAddr) Network() string { return "tunnel" }
-func (dummyAddr) String() string  { return "tunnel" }

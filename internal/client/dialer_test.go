@@ -73,12 +73,23 @@ func TestTunnelConn_Deadlines(t *testing.T) {
 	}
 }
 
-func TestDummyAddr(t *testing.T) {
-	addr := dummyAddr{}
-	if addr.Network() != "tunnel" {
-		t.Errorf("Network() = %q, want %q", addr.Network(), "tunnel")
+func TestTunnelConn_Addr(t *testing.T) {
+	conn := &tunnelConn{
+		reader: io.NopCloser(bytes.NewReader(nil)),
+		writer: nopWriteCloser{io.Discard},
 	}
-	if addr.String() != "tunnel" {
-		t.Errorf("String() = %q, want %q", addr.String(), "tunnel")
+	local, ok := conn.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		t.Fatal("LocalAddr() must return *net.TCPAddr")
+	}
+	if local.Port != 0 {
+		t.Errorf("LocalAddr().Port = %d, want 0", local.Port)
+	}
+	remote, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		t.Fatal("RemoteAddr() must return *net.TCPAddr")
+	}
+	if remote.Port != 0 {
+		t.Errorf("RemoteAddr().Port = %d, want 0", remote.Port)
 	}
 }
