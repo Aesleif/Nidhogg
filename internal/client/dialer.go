@@ -80,7 +80,7 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, error) 
 		return nil, writeErr
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Nidhogg-Tunnel") != "1" {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		pw.Close()

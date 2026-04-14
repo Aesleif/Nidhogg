@@ -53,6 +53,7 @@ func TunnelHandler(psk []byte, fallback http.Handler) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Nidhogg-Tunnel", "1")
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
