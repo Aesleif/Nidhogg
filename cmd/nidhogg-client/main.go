@@ -26,8 +26,16 @@ func main() {
 	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure)
 
 	srv := socks5.NewServer(
+		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.DialTunnel(ctx, addr)
+			log.Printf("SOCKS5 CONNECT → %s", addr)
+			conn, err := dialer.DialTunnel(ctx, addr)
+			if err != nil {
+				log.Printf("tunnel dial failed for %s: %v", addr, err)
+				return nil, err
+			}
+			log.Printf("tunnel established → %s", addr)
+			return conn, nil
 		}),
 	)
 
