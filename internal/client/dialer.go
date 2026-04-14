@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"github.com/aesleif/nidhogg/internal/transport"
 )
 
 // Dialer manages HTTP/2 connections to a nidhogg server and creates
@@ -49,8 +51,13 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, error) 
 	// until the HTTP client reads from pr.
 	headerWritten := make(chan error, 1)
 	go func() {
-		if _, err := pw.Write(d.psk); err != nil {
-			headerWritten <- fmt.Errorf("write PSK: %w", err)
+		marker, err := transport.GenerateHandshake(d.psk)
+		if err != nil {
+			headerWritten <- fmt.Errorf("generate handshake: %w", err)
+			return
+		}
+		if _, err := pw.Write(marker); err != nil {
+			headerWritten <- fmt.Errorf("write handshake: %w", err)
 			return
 		}
 		if _, err := pw.Write([]byte(dest + "\n")); err != nil {

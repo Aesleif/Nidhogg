@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/aesleif/nidhogg/internal/transport"
 )
 
 // TunnelHandler creates an http.Handler that handles tunnel connections.
@@ -15,13 +17,21 @@ import (
 // to the destination specified by the client. Otherwise, the request
 // is forwarded to the fallback handler (reverse proxy).
 func TunnelHandler(psk []byte, fallback http.Handler) http.Handler {
+	validator := transport.NewValidator(psk)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			fallback.ServeHTTP(w, r)
 			return
 		}
 
-		if !ReadAndCheckPSK(r.Body, psk) {
+		handshakeBuf := make([]byte, transport.HandshakeSize)
+		if _, err := io.ReadFull(r.Body, handshakeBuf); err != nil {
+			fallback.ServeHTTP(w, r)
+			return
+		}
+		if ok, err := validator.Validate(handshakeBuf); !ok {
+			log.Printf("tunnel: handshake rejected: %v", err)
 			fallback.ServeHTTP(w, r)
 			return
 		}
