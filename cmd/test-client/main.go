@@ -12,10 +12,10 @@ import (
 )
 
 func main() {
-	serverURL := "https://localhost:8443/"
-	psk := "my-dev-key"
-	dest := "example.com:80\n"
-	httpReq := "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+	serverURL := "https://localhost:443/"
+	psk := "secret-key"
+	dest := "github.com:80\n"
+	httpReq := "GET / HTTP/1.1\r\nHost: github.com\r\nConnection: close\r\n\r\n"
 
 	if len(os.Args) > 1 {
 		serverURL = os.Args[1]
