@@ -1,9 +1,9 @@
 {
-  "listen": ":443",
+  "listen": ":8443",
   "domain": "shop.example.com",
   "psk": "secret-key",
   "proxy_to": "https://google.com",
   "tunnel_path": "/",
-  "cert_file": "cert.pem",
-  "key_file": "key.pem"
+  "cert_file": "./env/cert.pem",
+  "key_file": "./env/key.pem"
 }
