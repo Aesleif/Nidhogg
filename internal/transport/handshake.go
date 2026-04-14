@@ -14,7 +14,6 @@ const (
 	HandshakeSize = 57
 	versionV1     = 0x01
 	nonceSize     = 16
-	hmacSize      = 32 // sha256.Size
 	nonceRingSize = 10000
 	maxClockSkew  = 60 * time.Second
 )

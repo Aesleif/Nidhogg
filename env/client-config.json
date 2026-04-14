@@ -1,6 +1,6 @@
 {
   "server": "127.0.0.1:8443",
-  "psk": "secret-key1",
+  "psk": "secret-key",
   "listen": "127.0.0.1:1080",
   "tunnel_path": "/",
   "insecure": true
