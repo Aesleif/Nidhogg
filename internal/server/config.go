@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/aesleif/nidhogg/internal/logging"
 )
 
 type Config struct {
@@ -17,6 +19,7 @@ type Config struct {
 	KeyFile         string   `json:"key_file,omitempty"`
 	ProfileTargets  []string `json:"profile_targets"`
 	ProfileInterval string   `json:"profile_interval"`
+	LogLevel        string   `json:"log_level"`
 }
 
 // ProfileIntervalDuration parses ProfileInterval as a time.Duration.
@@ -63,6 +66,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if len(cfg.ProfileTargets) == 0 {
 		cfg.ProfileTargets = []string{"google.com"}
+	}
+	if _, err := logging.ParseLevel(cfg.LogLevel); err != nil {
+		return nil, fmt.Errorf("invalid log_level: %w", err)
 	}
 
 	return &cfg, nil

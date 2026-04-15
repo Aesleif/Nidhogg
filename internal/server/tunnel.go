@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -36,7 +36,7 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 			return
 		}
 		if ok, err := validator.Validate(handshakeBuf); !ok {
-			log.Printf("tunnel: handshake rejected: %v", err)
+			slog.Debug("tunnel: handshake rejected", "err", err)
 			fallback.ServeHTTP(w, r)
 			return
 		}
@@ -45,7 +45,7 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 		reader := bufio.NewReader(r.Body)
 		dest, err := reader.ReadString('\n')
 		if err != nil {
-			log.Printf("tunnel: failed to read destination: %v", err)
+			slog.Warn("tunnel: failed to read destination", "err", err)
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
@@ -54,7 +54,7 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 		// Connect to upstream target
 		upstream, err := net.Dial("tcp", dest)
 		if err != nil {
-			log.Printf("tunnel: failed to dial %s: %v", dest, err)
+			slog.Warn("tunnel: failed to dial upstream", "dest", dest, "err", err)
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -63,7 +63,7 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 		// Start streaming response
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			log.Printf("tunnel: ResponseWriter does not support Flusher")
+			slog.Error("tunnel: ResponseWriter does not support Flusher")
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -80,7 +80,7 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 		if activeProfile != nil {
 			profJSON, err := json.Marshal(activeProfile)
 			if err != nil {
-				log.Printf("tunnel: failed to marshal profile: %v", err)
+				slog.Error("tunnel: failed to marshal profile", "err", err)
 				activeProfile = nil
 				w.Write([]byte{0, 0, 0, 0})
 			} else {

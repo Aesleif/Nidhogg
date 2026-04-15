@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -66,21 +66,23 @@ func (pm *ProfileManager) generateProfile() {
 	for _, target := range pm.targets {
 		snap, err := pcap.Collect(target, collectDuration)
 		if err != nil {
-			log.Printf("profile: failed to collect from %s: %v", target, err)
+			slog.Warn("profile: failed to collect", "target", target, "err", err)
 			continue
 		}
-		log.Printf("profile: collected %d samples from %s", len(snap.Samples), target)
+		slog.Info("profile: collected samples", "target", target, "samples", len(snap.Samples))
 		snapshots = append(snapshots, snap)
 	}
 
 	if len(snapshots) == 0 {
-		log.Printf("profile: no snapshots collected, skipping generation")
+		slog.Warn("profile: no snapshots collected, skipping generation")
 		return
 	}
 
 	name := strings.Join(pm.targets, "+")
 	prof := profile.Generate(name, snapshots)
 	pm.cache.Push(prof)
-	log.Printf("profile: generated %q (%d send CDF points, avg burst %d)",
-		prof.Name, len(prof.SendSizeCDF), prof.AvgBurstLen)
+	slog.Info("profile: generated",
+		"name", prof.Name,
+		"send_cdf_points", len(prof.SendSizeCDF),
+		"avg_burst", prof.AvgBurstLen)
 }

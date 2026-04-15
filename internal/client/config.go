@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
@@ -17,6 +18,7 @@ type Config struct {
 	Insecure    bool   `json:"insecure"`
 	Fingerprint string `json:"fingerprint"`  // "randomized" (default), "chrome", "firefox", "safari"
 	ShapingMode string `json:"shaping_mode"` // "", "stream", "balanced", "stealth"
+	LogLevel    string `json:"log_level"`    // "debug", "info" (default), "warn", "error"
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -48,6 +50,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if _, err := shaper.ParseMode(cfg.ShapingMode); err != nil {
 		return nil, fmt.Errorf("invalid shaping_mode: %w", err)
+	}
+	if _, err := logging.ParseLevel(cfg.LogLevel); err != nil {
+		return nil, fmt.Errorf("invalid log_level: %w", err)
 	}
 
 	return &cfg, nil

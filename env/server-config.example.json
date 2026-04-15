@@ -7,5 +7,6 @@
   "cert_file": "./env/cert.pem",
   "key_file": "./env/key.pem",
   "profile_targets": ["google.com"],
-  "profile_interval": "6h"
+  "profile_interval": "6h",
+  "log_level": "info"
 }

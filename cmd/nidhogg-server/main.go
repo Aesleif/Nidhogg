@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 
 	"golang.org/x/crypto/acme/autocert"
 
+	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/server"
 )
 
@@ -24,6 +26,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	level, _ := logging.ParseLevel(cfg.LogLevel) // already validated
+	logging.Setup(level)
 
 	proxy, err := server.NewReverseProxy(cfg.ProxyTo)
 	if err != nil {
@@ -73,9 +78,9 @@ func main() {
 		// HTTP-01 challenge handler on port 80
 		go func() {
 			h := manager.HTTPHandler(nil)
-			log.Printf("starting ACME HTTP-01 challenge server on :80")
+			slog.Info("starting ACME HTTP-01 challenge server", "addr", ":80")
 			if err := http.ListenAndServe(":80", h); err != nil {
-				log.Printf("ACME HTTP server error: %v", err)
+				slog.Error("ACME HTTP server error", "err", err)
 			}
 		}()
 	}
@@ -87,14 +92,14 @@ func main() {
 	go pm.Start(ctx)
 
 	go func() {
-		log.Printf("starting server on %s (domain: %s, tunnel: %s)", cfg.Listen, cfg.Domain, cfg.TunnelPath)
+		slog.Info("starting server", "listen", cfg.Listen, "domain", cfg.Domain, "tunnel", cfg.TunnelPath)
 		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Printf("shutting down...")
+	slog.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -102,5 +107,5 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("shutdown error: %v", err)
 	}
-	log.Printf("server stopped")
+	slog.Info("server stopped")
 }
