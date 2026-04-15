@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
 
 	"github.com/aesleif/nidhogg/internal/transport"
@@ -24,11 +25,23 @@ type Dialer struct {
 }
 
 // NewDialer creates a Dialer for the given server configuration.
-func NewDialer(server, tunnelPath string, psk []byte, insecure bool) *Dialer {
-	transport := &http2.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: insecure,
+// fingerprint controls the TLS ClientHello: "randomized" (default), "chrome", "firefox", "safari".
+func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string) *Dialer {
+	helloID, _ := transport.FingerprintID(fingerprint) // validated in config
+
+	h2transport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return transport.DialTLS(ctx, network, addr, insecure, helloID)
 		},
+	}
+
+	// Fallback for testing with standard TLS (e.g., httptest servers that don't support uTLS)
+	if helloID == (utls.ClientHelloID{}) {
+		h2transport = &http2.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: insecure,
+			},
+		}
 	}
 
 	serverURL := "https://" + server + tunnelPath
@@ -36,7 +49,7 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool) *Dialer {
 	return &Dialer{
 		serverURL: serverURL,
 		psk:       psk,
-		client:    &http.Client{Transport: transport},
+		client:    &http.Client{Transport: h2transport},
 	}
 }
 

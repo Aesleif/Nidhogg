@@ -23,7 +23,7 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure)
+	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint)
 
 	srv := socks5.NewServer(
 		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),

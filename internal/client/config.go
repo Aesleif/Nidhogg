@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/aesleif/nidhogg/internal/transport"
 )
 
 type Config struct {
-	Server     string `json:"server"`
-	PSK        string `json:"psk"`
-	Listen     string `json:"listen"`
-	TunnelPath string `json:"tunnel_path"`
-	Insecure   bool   `json:"insecure"`
+	Server      string `json:"server"`
+	PSK         string `json:"psk"`
+	Listen      string `json:"listen"`
+	TunnelPath  string `json:"tunnel_path"`
+	Insecure    bool   `json:"insecure"`
+	Fingerprint string `json:"fingerprint"` // "randomized" (default), "chrome", "firefox", "safari"
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -36,6 +39,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.TunnelPath == "" {
 		cfg.TunnelPath = "/"
+	}
+
+	if _, err := transport.FingerprintID(cfg.Fingerprint); err != nil {
+		return nil, fmt.Errorf("invalid fingerprint: %w", err)
 	}
 
 	return &cfg, nil

@@ -71,7 +71,7 @@ func newTestDialer(t *testing.T, srv *httptest.Server, psk []byte) *client.Diale
 	t.Helper()
 	// Extract host:port from test server URL (strip https://)
 	host := srv.URL[len("https://"):]
-	return client.NewDialer(host, "/", psk, true)
+	return client.NewDialer(host, "/", psk, true, "standard")
 }
 
 func TestTunnelEcho(t *testing.T) {
