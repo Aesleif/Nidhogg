@@ -3,5 +3,6 @@
   "psk": "secret-key",
   "listen": "127.0.0.1:1080",
   "tunnel_path": "/",
-  "insecure": true
+  "insecure": true,
+  "fingerprint": "randomized"
 }
