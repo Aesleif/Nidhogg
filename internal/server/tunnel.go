@@ -10,7 +10,10 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/aesleif/nidhogg/internal/profile"
+	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
 
@@ -70,33 +73,59 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 		flusher.Flush()
 
 		// Send profile inline: [size:4B big-endian] [json]
+		var activeProfile *profile.Profile
 		if pm != nil {
-			if prof := pm.Current(); prof != nil {
-				profJSON, err := json.Marshal(prof)
-				if err != nil {
-					log.Printf("tunnel: failed to marshal profile: %v", err)
-					profJSON = nil
-				}
-				if len(profJSON) > 0 {
-					var sizeBuf [4]byte
-					binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(profJSON)))
-					w.Write(sizeBuf[:])
-					w.Write(profJSON)
-				} else {
-					w.Write([]byte{0, 0, 0, 0})
-				}
-			} else {
+			activeProfile = pm.Current()
+		}
+		if activeProfile != nil {
+			profJSON, err := json.Marshal(activeProfile)
+			if err != nil {
+				log.Printf("tunnel: failed to marshal profile: %v", err)
+				activeProfile = nil
 				w.Write([]byte{0, 0, 0, 0})
+			} else {
+				var sizeBuf [4]byte
+				binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(profJSON)))
+				w.Write(sizeBuf[:])
+				w.Write(profJSON)
 			}
 		} else {
 			w.Write([]byte{0, 0, 0, 0})
 		}
 		flusher.Flush()
 
+		// If we have a profile, wrap the relay in ShapedConn (both directions).
+		// Server uses Stream mode — padding only, no artificial delays.
+		if activeProfile != nil {
+			tc := &serverTunnelConn{reader: reader, writer: w, flusher: flusher}
+			shaped := shaper.NewShapedConn(tc, activeProfile, shaper.Stream)
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// Client → Upstream: decode frames from shaped, write payload to upstream
+			go func() {
+				defer wg.Done()
+				io.Copy(upstream, shaped)
+				if tcpConn, ok := upstream.(*net.TCPConn); ok {
+					tcpConn.CloseWrite()
+				}
+			}()
+
+			// Upstream → Client: read raw data, encode as shaped frames
+			go func() {
+				defer wg.Done()
+				io.Copy(shaped, upstream)
+			}()
+
+			wg.Wait()
+			return
+		}
+
+		// Fallback: raw relay without shaping
 		var wg sync.WaitGroup
 		wg.Add(2)
 
-		// Client → Upstream (request body → upstream connection)
 		go func() {
 			defer wg.Done()
 			io.Copy(upstream, reader)
@@ -105,7 +134,6 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 			}
 		}()
 
-		// Upstream → Client (upstream connection → response body)
 		go func() {
 			defer wg.Done()
 			buf := make([]byte, 32*1024)
@@ -126,3 +154,28 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 		wg.Wait()
 	})
 }
+
+// serverTunnelConn adapts (reader, ResponseWriter) to net.Conn
+// so ShapedConn can wrap the server side of the tunnel.
+type serverTunnelConn struct {
+	reader  io.Reader
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (c *serverTunnelConn) Read(b []byte) (int, error) { return c.reader.Read(b) }
+
+func (c *serverTunnelConn) Write(b []byte) (int, error) {
+	n, err := c.writer.Write(b)
+	if c.flusher != nil {
+		c.flusher.Flush()
+	}
+	return n, err
+}
+
+func (c *serverTunnelConn) Close() error                       { return nil }
+func (c *serverTunnelConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (c *serverTunnelConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (c *serverTunnelConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *serverTunnelConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *serverTunnelConn) SetWriteDeadline(_ time.Time) error { return nil }

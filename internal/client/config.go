@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
 
@@ -14,7 +15,8 @@ type Config struct {
 	Listen      string `json:"listen"`
 	TunnelPath  string `json:"tunnel_path"`
 	Insecure    bool   `json:"insecure"`
-	Fingerprint string `json:"fingerprint"` // "randomized" (default), "chrome", "firefox", "safari"
+	Fingerprint string `json:"fingerprint"`  // "randomized" (default), "chrome", "firefox", "safari"
+	ShapingMode string `json:"shaping_mode"` // "", "stream", "balanced", "stealth"
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -43,6 +45,9 @@ func LoadConfig(path string) (*Config, error) {
 
 	if _, err := transport.FingerprintID(cfg.Fingerprint); err != nil {
 		return nil, fmt.Errorf("invalid fingerprint: %w", err)
+	}
+	if _, err := shaper.ParseMode(cfg.ShapingMode); err != nil {
+		return nil, fmt.Errorf("invalid shaping_mode: %w", err)
 	}
 
 	return &cfg, nil

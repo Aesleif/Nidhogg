@@ -4,5 +4,6 @@
   "listen": "127.0.0.1:1080",
   "tunnel_path": "/",
   "insecure": true,
-  "fingerprint": "randomized"
+  "fingerprint": "randomized",
+  "shaping_mode": "balanced"
 }

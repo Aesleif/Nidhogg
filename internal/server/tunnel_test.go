@@ -10,12 +10,16 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/aesleif/nidhogg/internal/client"
+	"github.com/aesleif/nidhogg/internal/pcap"
+	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/server"
+	"github.com/aesleif/nidhogg/internal/shaper"
 )
 
 // startEchoServer starts a TCP server that echoes all received data back.
@@ -45,6 +49,10 @@ func startEchoServer(t *testing.T) string {
 
 // startTunnelServer starts an httptest TLS server with TunnelHandler.
 func startTunnelServer(t *testing.T, psk []byte) *httptest.Server {
+	return startTunnelServerWithPM(t, psk, nil)
+}
+
+func startTunnelServerWithPM(t *testing.T, psk []byte, pm *server.ProfileManager) *httptest.Server {
 	t.Helper()
 
 	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +60,7 @@ func startTunnelServer(t *testing.T, psk []byte) *httptest.Server {
 		w.Write([]byte("fallback"))
 	})
 
-	handler := server.TunnelHandler(psk, fallback, nil)
+	handler := server.TunnelHandler(psk, fallback, pm)
 
 	// Use h2c for testing (HTTP/2 without TLS) to avoid cert setup complexity
 	h2s := &http2.Server{}
@@ -68,10 +76,67 @@ func startTunnelServer(t *testing.T, psk []byte) *httptest.Server {
 
 // newTestDialer creates a Dialer pointed at the test server.
 func newTestDialer(t *testing.T, srv *httptest.Server, psk []byte) *client.Dialer {
+	return newTestDialerWithShaping(t, srv, psk, shaper.Disabled)
+}
+
+func newTestDialerWithShaping(t *testing.T, srv *httptest.Server, psk []byte, mode shaper.ShapingMode) *client.Dialer {
 	t.Helper()
-	// Extract host:port from test server URL (strip https://)
 	host := srv.URL[len("https://"):]
-	return client.NewDialer(host, "/", psk, true, "standard")
+	return client.NewDialer(host, "/", psk, true, "standard", mode)
+}
+
+func makeTestProfile() *profile.Profile {
+	base := time.Now()
+	snap := &pcap.TrafficSnapshot{
+		Target:    "test",
+		Duration:  time.Second,
+		CreatedAt: base,
+		Samples: []pcap.PacketSample{
+			{Size: 200, Direction: true, Timestamp: base},
+			{Size: 400, Direction: false, Timestamp: base.Add(5 * time.Millisecond)},
+			{Size: 300, Direction: true, Timestamp: base.Add(10 * time.Millisecond)},
+			{Size: 800, Direction: false, Timestamp: base.Add(15 * time.Millisecond)},
+			{Size: 1200, Direction: true, Timestamp: base.Add(20 * time.Millisecond)},
+		},
+	}
+	return profile.Generate("test-profile", []*pcap.TrafficSnapshot{snap})
+}
+
+func TestTunnelEchoShaped(t *testing.T) {
+	psk := []byte("shaped-psk")
+	echoAddr := startEchoServer(t)
+
+	pm := server.NewProfileManager([]string{"test"}, time.Hour)
+	pm.Push(makeTestProfile())
+
+	srv := startTunnelServerWithPM(t, psk, pm)
+	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Balanced)
+
+	conn, prof, err := dialer.DialTunnel(context.Background(), echoAddr)
+	if err != nil {
+		t.Fatalf("DialTunnel: %v", err)
+	}
+	defer conn.Close()
+
+	if prof == nil {
+		t.Fatal("expected profile from server, got nil")
+	}
+	if prof.Name != "test-profile" {
+		t.Errorf("profile name = %q, want %q", prof.Name, "test-profile")
+	}
+
+	msg := []byte("hello shaped tunnel")
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if !bytes.Equal(buf, msg) {
+		t.Errorf("shaped echo = %q, want %q", buf, msg)
+	}
 }
 
 func TestTunnelEcho(t *testing.T) {

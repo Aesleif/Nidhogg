@@ -16,6 +16,8 @@ import (
 type ShapingMode int
 
 const (
+	// Disabled means no shaping is applied.
+	Disabled ShapingMode = -1
 	// Stream pads packet sizes only, no timing delays. Best for video/downloads.
 	Stream ShapingMode = iota
 	// Balanced pads sizes and groups writes into bursts. Default mode.
@@ -23,6 +25,23 @@ const (
 	// Stealth pads sizes, applies timing delays, and groups into bursts.
 	Stealth
 )
+
+// ParseMode maps a config string to a ShapingMode.
+// Empty string returns Disabled.
+func ParseMode(name string) (ShapingMode, error) {
+	switch name {
+	case "":
+		return Disabled, nil
+	case "stream":
+		return Stream, nil
+	case "balanced":
+		return Balanced, nil
+	case "stealth":
+		return Stealth, nil
+	default:
+		return Disabled, fmt.Errorf("unknown shaping mode: %q", name)
+	}
+}
 
 // Frame format:
 //   [frame_size: 2 bytes big-endian] [payload_length: 2 bytes big-endian] [payload: N bytes] [padding: M bytes]

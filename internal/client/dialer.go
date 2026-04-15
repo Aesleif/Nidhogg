@@ -15,6 +15,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/aesleif/nidhogg/internal/profile"
+	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
 
@@ -22,14 +23,16 @@ import (
 // tunnel streams. A single Dialer multiplexes all tunnels over one
 // TLS connection via HTTP/2 streams.
 type Dialer struct {
-	serverURL string
-	psk       []byte
-	client    *http.Client
+	serverURL   string
+	psk         []byte
+	client      *http.Client
+	shapingMode shaper.ShapingMode
 }
 
 // NewDialer creates a Dialer for the given server configuration.
 // fingerprint controls the TLS ClientHello: "randomized" (default), "chrome", "firefox", "safari".
-func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string) *Dialer {
+// shapingMode controls traffic shaping mode applied to established tunnels.
+func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode) *Dialer {
 	helloID, _ := transport.FingerprintID(fingerprint) // validated in config
 
 	h2transport := &http2.Transport{
@@ -50,9 +53,10 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 	serverURL := "https://" + server + tunnelPath
 
 	return &Dialer{
-		serverURL: serverURL,
-		psk:       psk,
-		client:    &http.Client{Transport: h2transport},
+		serverURL:   serverURL,
+		psk:         psk,
+		client:      &http.Client{Transport: h2transport},
+		shapingMode: shapingMode,
 	}
 }
 
@@ -134,10 +138,15 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 		}
 	}
 
-	return &tunnelConn{
+	baseConn := &tunnelConn{
 		reader: resp.Body,
 		writer: pw,
-	}, prof, nil
+	}
+
+	if prof != nil && d.shapingMode != shaper.Disabled {
+		return shaper.NewShapedConn(baseConn, prof, d.shapingMode), prof, nil
+	}
+	return baseConn, prof, nil
 }
 
 // tunnelConn adapts an HTTP/2 streaming response into a net.Conn.

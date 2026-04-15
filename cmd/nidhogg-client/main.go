@@ -12,6 +12,7 @@ import (
 	"github.com/things-go/go-socks5"
 
 	"github.com/aesleif/nidhogg/internal/client"
+	"github.com/aesleif/nidhogg/internal/shaper"
 )
 
 func main() {
@@ -23,7 +24,8 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint)
+	shapingMode, _ := shaper.ParseMode(cfg.ShapingMode) // already validated in LoadConfig
+	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint, shapingMode)
 
 	srv := socks5.NewServer(
 		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),

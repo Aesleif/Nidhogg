@@ -55,6 +55,11 @@ func (pm *ProfileManager) Current() *profile.Profile {
 	return pm.cache.Current()
 }
 
+// Push inserts a profile into the cache without collecting. Useful for tests.
+func (pm *ProfileManager) Push(p *profile.Profile) {
+	pm.cache.Push(p)
+}
+
 func (pm *ProfileManager) generateProfile() {
 	var snapshots []*pcap.TrafficSnapshot
 
