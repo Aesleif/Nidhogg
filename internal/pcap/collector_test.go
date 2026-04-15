@@ -113,6 +113,29 @@ func TestCollect(t *testing.T) {
 	t.Logf("collected %d samples over %v", len(snapshot.Samples), snapshot.Duration)
 }
 
+// TestCollectReal connects to a real site. Skipped in CI, run manually:
+//
+//	go test ./internal/pcap/ -v -run TestCollectReal
+func TestCollectReal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real network test in short mode")
+	}
+
+	snapshot, err := Collect("google.com", 10*time.Second)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	t.Logf("target: %s, samples: %d, duration: %v", snapshot.Target, len(snapshot.Samples), snapshot.Duration)
+	for i, s := range snapshot.Samples {
+		dir := "RECV"
+		if s.Direction {
+			dir = "SENT"
+		}
+		t.Logf("  [%3d] %s %6d bytes  +%v", i, dir, s.Size, s.Timestamp.Sub(snapshot.CreatedAt))
+	}
+}
+
 // collectWithTLS is a test helper that uses a custom TLS config (for httptest servers).
 func collectWithTLS(target string, duration time.Duration, tlsConfig *tls.Config) (*TrafficSnapshot, error) {
 	var recorder *RecordingConn
