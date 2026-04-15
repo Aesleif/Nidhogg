@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +14,7 @@ import (
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
 
+	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
 
@@ -56,7 +59,7 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 // DialTunnel opens a new tunnel stream to the given destination (host:port)
 // through the nidhogg server. The returned net.Conn represents the
 // bidirectional tunnel.
-func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, error) {
+func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profile.Profile, error) {
 	pr, pw := io.Pipe()
 
 	// Write PSK and destination before HTTP request is sent.
@@ -83,34 +86,58 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, error) 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.serverURL, pr)
 	if err != nil {
 		pw.Close()
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	resp, err := d.client.Do(req)
 	if err != nil {
 		pw.Close()
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, nil, fmt.Errorf("request failed: %w", err)
 	}
 
 	// Check if header write succeeded
 	if writeErr := <-headerWritten; writeErr != nil {
 		resp.Body.Close()
 		pw.Close()
-		return nil, writeErr
+		return nil, nil, writeErr
 	}
 
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Nidhogg-Tunnel") != "1" {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		pw.Close()
-		return nil, fmt.Errorf("tunnel rejected (status %d): %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("tunnel rejected (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Read inline profile: [size:4B] [json]
+	var prof *profile.Profile
+	var sizeBuf [4]byte
+	if _, err := io.ReadFull(resp.Body, sizeBuf[:]); err != nil {
+		resp.Body.Close()
+		pw.Close()
+		return nil, nil, fmt.Errorf("read profile size: %w", err)
+	}
+	profSize := binary.BigEndian.Uint32(sizeBuf[:])
+	if profSize > 0 {
+		profJSON := make([]byte, profSize)
+		if _, err := io.ReadFull(resp.Body, profJSON); err != nil {
+			resp.Body.Close()
+			pw.Close()
+			return nil, nil, fmt.Errorf("read profile data: %w", err)
+		}
+		prof = &profile.Profile{}
+		if err := json.Unmarshal(profJSON, prof); err != nil {
+			resp.Body.Close()
+			pw.Close()
+			return nil, nil, fmt.Errorf("parse profile: %w", err)
+		}
 	}
 
 	return &tunnelConn{
 		reader: resp.Body,
 		writer: pw,
-	}, nil
+	}, prof, nil
 }
 
 // tunnelConn adapts an HTTP/2 streaming response into a net.Conn.

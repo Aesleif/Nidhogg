@@ -2,6 +2,8 @@ package server
 
 import (
 	"bufio"
+	"encoding/binary"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -16,7 +18,7 @@ import (
 // If the PSK in the request body matches, the connection is tunneled
 // to the destination specified by the client. Otherwise, the request
 // is forwarded to the fallback handler (reverse proxy).
-func TunnelHandler(psk []byte, fallback http.Handler) http.Handler {
+func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.Handler {
 	validator := transport.NewValidator(psk)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +67,30 @@ func TunnelHandler(psk []byte, fallback http.Handler) http.Handler {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("X-Nidhogg-Tunnel", "1")
 		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+
+		// Send profile inline: [size:4B big-endian] [json]
+		if pm != nil {
+			if prof := pm.Current(); prof != nil {
+				profJSON, err := json.Marshal(prof)
+				if err != nil {
+					log.Printf("tunnel: failed to marshal profile: %v", err)
+					profJSON = nil
+				}
+				if len(profJSON) > 0 {
+					var sizeBuf [4]byte
+					binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(profJSON)))
+					w.Write(sizeBuf[:])
+					w.Write(profJSON)
+				} else {
+					w.Write([]byte{0, 0, 0, 0})
+				}
+			} else {
+				w.Write([]byte{0, 0, 0, 0})
+			}
+		} else {
+			w.Write([]byte{0, 0, 0, 0})
+		}
 		flusher.Flush()
 
 		var wg sync.WaitGroup

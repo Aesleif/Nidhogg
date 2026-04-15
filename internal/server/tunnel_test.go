@@ -52,7 +52,7 @@ func startTunnelServer(t *testing.T, psk []byte) *httptest.Server {
 		w.Write([]byte("fallback"))
 	})
 
-	handler := server.TunnelHandler(psk, fallback)
+	handler := server.TunnelHandler(psk, fallback, nil)
 
 	// Use h2c for testing (HTTP/2 without TLS) to avoid cert setup complexity
 	h2s := &http2.Server{}
@@ -80,7 +80,7 @@ func TestTunnelEcho(t *testing.T) {
 	srv := startTunnelServer(t, psk)
 	dialer := newTestDialer(t, srv, psk)
 
-	conn, err := dialer.DialTunnel(context.Background(), echoAddr)
+	conn, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
 		t.Fatalf("DialTunnel: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestTunnelWrongPSK(t *testing.T) {
 	srv := startTunnelServer(t, psk)
 	dialer := newTestDialer(t, srv, []byte("wrong-psk-key"))
 
-	_, err := dialer.DialTunnel(context.Background(), "127.0.0.1:9999")
+	_, _, err := dialer.DialTunnel(context.Background(), "127.0.0.1:9999")
 	if err == nil {
 		t.Fatal("expected error with wrong PSK, got nil")
 	}
@@ -129,7 +129,7 @@ func TestTunnelMultiplex(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 
-			conn, err := dialer.DialTunnel(context.Background(), echoAddr)
+			conn, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 			if err != nil {
 				errors <- err
 				return
@@ -168,7 +168,7 @@ func TestTunnelLargeTransfer(t *testing.T) {
 	srv := startTunnelServer(t, psk)
 	dialer := newTestDialer(t, srv, psk)
 
-	conn, err := dialer.DialTunnel(context.Background(), echoAddr)
+	conn, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
 		t.Fatalf("DialTunnel: %v", err)
 	}

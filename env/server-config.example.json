@@ -5,5 +5,7 @@
   "proxy_to": "https://google.com",
   "tunnel_path": "/",
   "cert_file": "./env/cert.pem",
-  "key_file": "./env/key.pem"
+  "key_file": "./env/key.pem",
+  "profile_targets": ["google.com"],
+  "profile_interval": "6h"
 }

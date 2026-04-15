@@ -29,12 +29,16 @@ func main() {
 		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 			log.Printf("SOCKS5 CONNECT → %s", addr)
-			conn, err := dialer.DialTunnel(ctx, addr)
+			conn, prof, err := dialer.DialTunnel(ctx, addr)
 			if err != nil {
 				log.Printf("tunnel dial failed for %s: %v", addr, err)
 				return nil, err
 			}
-			log.Printf("tunnel established → %s", addr)
+			if prof != nil {
+				log.Printf("tunnel established → %s (profile: %s)", addr, prof.Name)
+			} else {
+				log.Printf("tunnel established → %s (no profile)", addr)
+			}
 			return conn, nil
 		}),
 	)

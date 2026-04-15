@@ -4,16 +4,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 type Config struct {
-	Listen     string `json:"listen"`
-	Domain     string `json:"domain"`
-	PSK        string `json:"psk"`
-	ProxyTo    string `json:"proxy_to"`
-	TunnelPath string `json:"tunnel_path"`
-	CertFile   string `json:"cert_file,omitempty"`
-	KeyFile    string `json:"key_file,omitempty"`
+	Listen          string   `json:"listen"`
+	Domain          string   `json:"domain"`
+	PSK             string   `json:"psk"`
+	ProxyTo         string   `json:"proxy_to"`
+	TunnelPath      string   `json:"tunnel_path"`
+	CertFile        string   `json:"cert_file,omitempty"`
+	KeyFile         string   `json:"key_file,omitempty"`
+	ProfileTargets  []string `json:"profile_targets"`
+	ProfileInterval string   `json:"profile_interval"`
+}
+
+// ProfileIntervalDuration parses ProfileInterval as a time.Duration.
+// Returns 6h if not set.
+func (c *Config) ProfileIntervalDuration() time.Duration {
+	if c.ProfileInterval == "" {
+		return 6 * time.Hour
+	}
+	d, err := time.ParseDuration(c.ProfileInterval)
+	if err != nil {
+		return 6 * time.Hour
+	}
+	return d
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -44,6 +60,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("cert_file and key_file must both be set or both be empty")
+	}
+	if len(cfg.ProfileTargets) == 0 {
+		cfg.ProfileTargets = []string{"google.com"}
 	}
 
 	return &cfg, nil

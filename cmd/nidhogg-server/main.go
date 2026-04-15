@@ -32,9 +32,12 @@ func main() {
 
 	psk := []byte(cfg.PSK)
 
+	// Profile manager: generates traffic profiles from target sites
+	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileIntervalDuration())
+
 	// Tunnel handler on tunnel_path, everything else goes to reverse proxy
 	mux := http.NewServeMux()
-	tunnelHandler := server.TunnelHandler(psk, proxy)
+	tunnelHandler := server.TunnelHandler(psk, proxy, pm)
 	mux.Handle(cfg.TunnelPath, tunnelHandler)
 	if cfg.TunnelPath != "/" {
 		mux.Handle("/", proxy)
@@ -80,6 +83,8 @@ func main() {
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go pm.Start(ctx)
 
 	go func() {
 		log.Printf("starting server on %s (domain: %s, tunnel: %s)", cfg.Listen, cfg.Domain, cfg.TunnelPath)
