@@ -40,7 +40,7 @@ func Detect(stats ConnStats, cfg Config) DegradationLevel {
 	if stats.WriteErrors >= 1 {
 		return Degraded
 	}
-	if stats.ReadTimeouts >= 1 {
+	if stats.ReadTimeouts >= 2 {
 		return Degraded
 	}
 	if cfg.MaxWriteLatency > 0 && stats.AvgWriteLatency > cfg.MaxWriteLatency/2 {

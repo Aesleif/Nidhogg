@@ -1,6 +1,7 @@
 package health
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -85,7 +86,7 @@ func (c *MonitoredConn) Read(b []byte) (int, error) {
 		c.lastReadAt = time.Now()
 		c.mu.Unlock()
 	}
-	if err != nil && err != io.EOF {
+	if err != nil && err != io.EOF && isTimeout(err) {
 		c.mu.Lock()
 		c.readTimeouts++
 		c.checkLevel()
@@ -190,6 +191,14 @@ func (c *MonitoredConn) checkLevel() {
 	}
 
 	c.mu.Lock()
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	return false
 }
 
 // must be called under c.mu

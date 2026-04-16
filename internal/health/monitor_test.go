@@ -148,6 +148,66 @@ func TestMonitoredConnDegradationCallback(t *testing.T) {
 	}
 }
 
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "i/o timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
+type timeoutConn struct {
+	net.Conn
+}
+
+func (c *timeoutConn) Read(b []byte) (int, error) {
+	return 0, &timeoutError{}
+}
+
+type resetConn struct {
+	net.Conn
+}
+
+func (c *resetConn) Read(b []byte) (int, error) {
+	return 0, errors.New("connection reset by peer")
+}
+
+func TestMonitoredConnReadTimeoutCounted(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	inner := &timeoutConn{Conn: a}
+	cfg := health.DefaultConfig()
+	mc := health.NewMonitoredConn(inner, 10*time.Millisecond, cfg, "test:443")
+
+	mc.Read(make([]byte, 64))
+	mc.Read(make([]byte, 64))
+
+	stats := mc.Stats()
+	if stats.ReadTimeouts != 2 {
+		t.Errorf("ReadTimeouts = %d, want 2", stats.ReadTimeouts)
+	}
+}
+
+func TestMonitoredConnResetNotCounted(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	inner := &resetConn{Conn: a}
+	cfg := health.DefaultConfig()
+	mc := health.NewMonitoredConn(inner, 10*time.Millisecond, cfg, "test:443")
+
+	mc.Read(make([]byte, 64))
+
+	stats := mc.Stats()
+	if stats.ReadTimeouts != 0 {
+		t.Errorf("ReadTimeouts = %d, want 0 (connection reset is not a timeout)", stats.ReadTimeouts)
+	}
+	if !mc.IsHealthy() {
+		t.Error("expected healthy after connection reset")
+	}
+}
+
 func TestMonitoredConnHighRTT(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()

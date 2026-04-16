@@ -32,10 +32,21 @@ func TestDetectDegradedReadTimeout(t *testing.T) {
 	cfg := health.DefaultConfig()
 	stats := health.ConnStats{
 		HandshakeRTT: 100 * time.Millisecond,
-		ReadTimeouts: 1,
+		ReadTimeouts: 2,
 	}
 	if level := health.Detect(stats, cfg); level != health.Degraded {
 		t.Errorf("Detect = %v, want Degraded", level)
+	}
+}
+
+func TestDetectHealthySingleReadTimeout(t *testing.T) {
+	cfg := health.DefaultConfig()
+	stats := health.ConnStats{
+		HandshakeRTT: 100 * time.Millisecond,
+		ReadTimeouts: 1,
+	}
+	if level := health.Detect(stats, cfg); level != health.Healthy {
+		t.Errorf("Detect = %v, want Healthy (single timeout is not degraded)", level)
 	}
 }
 
