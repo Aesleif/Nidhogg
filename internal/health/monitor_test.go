@@ -84,29 +84,67 @@ func TestMonitoredConnWriteErrors(t *testing.T) {
 	cfg.ConsecutiveFailures = 3
 	mc := health.NewMonitoredConn(inner, 10*time.Millisecond, cfg, "test:443")
 
-	if !mc.IsHealthy() {
-		t.Fatal("expected healthy before errors")
+	if mc.Level() != health.Healthy {
+		t.Fatal("expected Healthy before errors")
 	}
 
 	// First 2 writes succeed
 	mc.Write([]byte("ok"))
 	mc.Write([]byte("ok"))
-	if !mc.IsHealthy() {
-		t.Fatal("expected healthy after successful writes")
+	if mc.Level() != health.Healthy {
+		t.Fatal("expected Healthy after successful writes")
 	}
 
-	// Next 3 writes fail — should become unhealthy
+	// 1 write error → Degraded
+	mc.Write([]byte("fail"))
+	if mc.Level() != health.Degraded {
+		t.Errorf("Level = %v, want Degraded after 1 error", mc.Level())
+	}
+
+	// 2 more errors → Critical (3 total consecutive)
 	mc.Write([]byte("fail"))
 	mc.Write([]byte("fail"))
-	mc.Write([]byte("fail"))
+	if mc.Level() != health.Critical {
+		t.Errorf("Level = %v, want Critical after 3 errors", mc.Level())
+	}
 
 	if mc.IsHealthy() {
-		t.Error("expected unhealthy after consecutive write errors")
+		t.Error("expected unhealthy at Critical level")
+	}
+}
+
+func TestMonitoredConnDegradationCallback(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+
+	inner := &errorConn{Conn: a, failAfter: 0}
+	cfg := health.DefaultConfig()
+	cfg.ConsecutiveFailures = 3
+
+	var callbackLevels []health.DegradationLevel
+	done := make(chan struct{}, 5)
+
+	mc := health.NewMonitoredConn(inner, 10*time.Millisecond, cfg, "test:443")
+	mc.OnDegradation = func(level health.DegradationLevel, _ health.ConnStats) {
+		callbackLevels = append(callbackLevels, level)
+		done <- struct{}{}
 	}
 
-	stats := mc.Stats()
-	if stats.WriteErrors < 3 {
-		t.Errorf("WriteErrors = %d, want >= 3", stats.WriteErrors)
+	// First write fails → should transition to Degraded
+	mc.Write([]byte("fail"))
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("callback not called")
+	}
+
+	if len(callbackLevels) == 0 {
+		t.Fatal("no callback received")
+	}
+	if callbackLevels[0] != health.Degraded {
+		t.Errorf("first callback level = %v, want Degraded", callbackLevels[0])
 	}
 }
 
@@ -124,7 +162,7 @@ func TestMonitoredConnHighRTT(t *testing.T) {
 	}
 
 	stats := mc.Stats()
-	if stats.Healthy {
-		t.Error("Stats.Healthy should be false")
+	if stats.Level != health.Critical {
+		t.Errorf("Stats.Level = %v, want Critical", stats.Level)
 	}
 }

@@ -35,7 +35,7 @@ type ConnStats struct {
 	TotalWritten    int64
 	Duration        time.Duration
 	AvgWriteLatency time.Duration
-	Healthy         bool
+	Level           DegradationLevel
 }
 
 type MonitoredConn struct {
@@ -45,6 +45,8 @@ type MonitoredConn struct {
 	startedAt    time.Time
 	dest         string
 
+	OnDegradation func(DegradationLevel, ConnStats)
+
 	mu           sync.Mutex
 	writeErrors  int
 	readTimeouts int
@@ -52,6 +54,7 @@ type MonitoredConn struct {
 	writeSamples [writeSampleSize]time.Duration
 	writeIdx     int
 	writeCount   int
+	level        DegradationLevel
 
 	totalRead    atomic.Int64
 	totalWritten atomic.Int64
@@ -59,7 +62,7 @@ type MonitoredConn struct {
 
 func NewMonitoredConn(conn net.Conn, handshakeRTT time.Duration, cfg Config, dest string) *MonitoredConn {
 	now := time.Now()
-	return &MonitoredConn{
+	mc := &MonitoredConn{
 		Conn:         conn,
 		cfg:          cfg,
 		handshakeRTT: handshakeRTT,
@@ -67,6 +70,10 @@ func NewMonitoredConn(conn net.Conn, handshakeRTT time.Duration, cfg Config, des
 		lastReadAt:   now,
 		dest:         dest,
 	}
+	// Detect initial level (handshake RTT may already be critical)
+	stats := mc.statsLocked()
+	mc.level = Detect(stats, cfg)
+	return mc
 }
 
 func (c *MonitoredConn) Read(b []byte) (int, error) {
@@ -80,6 +87,7 @@ func (c *MonitoredConn) Read(b []byte) (int, error) {
 	if err != nil && err != io.EOF {
 		c.mu.Lock()
 		c.readTimeouts++
+		c.checkLevel()
 		c.mu.Unlock()
 	}
 	return n, err
@@ -97,6 +105,7 @@ func (c *MonitoredConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
 	if err != nil {
 		c.writeErrors++
+		c.checkLevel()
 	} else {
 		c.writeErrors = 0
 		c.writeSamples[c.writeIdx] = latency
@@ -118,7 +127,7 @@ func (c *MonitoredConn) Close() error {
 		"duration", stats.Duration,
 		"read", stats.TotalRead,
 		"written", stats.TotalWritten,
-		"healthy", stats.Healthy,
+		"level", stats.Level,
 		"write_errors", stats.WriteErrors,
 		"read_timeouts", stats.ReadTimeouts,
 		"avg_write_latency", stats.AvgWriteLatency,
@@ -126,30 +135,24 @@ func (c *MonitoredConn) Close() error {
 	return c.Conn.Close()
 }
 
-func (c *MonitoredConn) IsHealthy() bool {
-	if c.handshakeRTT > c.cfg.MaxHandshakeRTT {
-		return false
-	}
-
+func (c *MonitoredConn) Level() DegradationLevel {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.level
+}
 
-	if c.writeErrors >= c.cfg.ConsecutiveFailures {
-		return false
-	}
-	if c.readTimeouts >= c.cfg.ReadTimeoutLimit {
-		return false
-	}
-	if c.writeCount > 0 && c.avgWriteLatency() > c.cfg.MaxWriteLatency {
-		return false
-	}
-	return true
+func (c *MonitoredConn) IsHealthy() bool {
+	return c.Level() == Healthy
 }
 
 func (c *MonitoredConn) Stats() ConnStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.statsLocked()
+}
 
+// must be called under c.mu
+func (c *MonitoredConn) statsLocked() ConnStats {
 	return ConnStats{
 		HandshakeRTT:    c.handshakeRTT,
 		WriteErrors:     c.writeErrors,
@@ -158,8 +161,31 @@ func (c *MonitoredConn) Stats() ConnStats {
 		TotalWritten:    c.totalWritten.Load(),
 		Duration:        time.Since(c.startedAt),
 		AvgWriteLatency: c.avgWriteLatency(),
-		Healthy:         c.isHealthyLocked(),
+		Level:           c.level,
 	}
+}
+
+// must be called under c.mu. Fires callback outside mutex if level changed.
+func (c *MonitoredConn) checkLevel() {
+	stats := c.statsLocked()
+	newLevel := Detect(stats, c.cfg)
+	if newLevel == c.level {
+		return
+	}
+	old := c.level
+	c.level = newLevel
+	stats.Level = newLevel
+
+	cb := c.OnDegradation
+	dest := c.dest
+	c.mu.Unlock()
+
+	slog.Warn("tunnel degradation changed", "dest", dest, "from", old, "to", newLevel)
+	if cb != nil {
+		cb(newLevel, stats)
+	}
+
+	c.mu.Lock()
 }
 
 // must be called under c.mu
@@ -172,21 +198,4 @@ func (c *MonitoredConn) avgWriteLatency() time.Duration {
 		total += c.writeSamples[i]
 	}
 	return total / time.Duration(c.writeCount)
-}
-
-// must be called under c.mu
-func (c *MonitoredConn) isHealthyLocked() bool {
-	if c.handshakeRTT > c.cfg.MaxHandshakeRTT {
-		return false
-	}
-	if c.writeErrors >= c.cfg.ConsecutiveFailures {
-		return false
-	}
-	if c.readTimeouts >= c.cfg.ReadTimeoutLimit {
-		return false
-	}
-	if c.writeCount > 0 && c.avgWriteLatency() > c.cfg.MaxWriteLatency {
-		return false
-	}
-	return true
 }

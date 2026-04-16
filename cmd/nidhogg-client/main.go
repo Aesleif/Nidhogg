@@ -56,6 +56,13 @@ func main() {
 				slog.Debug("tunnel established", "addr", addr, "profile", "none", "rtt", rtt)
 			}
 			monitored := health.NewMonitoredConn(conn, rtt, healthCfg, addr)
+			monitored.OnDegradation = func(level health.DegradationLevel, stats health.ConnStats) {
+				slog.Warn("tunnel health changed",
+					"dest", addr, "level", level,
+					"write_errors", stats.WriteErrors,
+					"read_timeouts", stats.ReadTimeouts,
+					"avg_write_latency", stats.AvgWriteLatency)
+			}
 			return monitored, nil
 		}),
 	)
