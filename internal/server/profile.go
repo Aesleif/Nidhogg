@@ -151,7 +151,19 @@ func (pm *ProfileManager) regenerate(trigger string) {
 	pm.mu.Unlock()
 
 	if len(snaps) == 0 {
-		slog.Debug("profile: regenerate skipped, buffer empty", "trigger", trigger)
+		slog.Debug("profile: buffer empty, collecting fresh snapshots", "trigger", trigger)
+		for _, target := range pm.targets {
+			snap, err := pcap.Collect(target, collectDuration)
+			if err != nil {
+				slog.Warn("profile: collect failed", "target", target, "err", err)
+				continue
+			}
+			snaps = append(snaps, snap)
+		}
+	}
+
+	if len(snaps) == 0 {
+		slog.Warn("profile: regenerate failed, no data", "trigger", trigger)
 		return
 	}
 
