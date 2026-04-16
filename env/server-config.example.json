@@ -8,5 +8,6 @@
   "key_file": "./env/key.pem",
   "profile_targets": ["google.com"],
   "profile_interval": "6h",
+  "profile_min_snapshots": 20,
   "log_level": "info"
 }

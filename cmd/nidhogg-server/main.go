@@ -38,7 +38,7 @@ func main() {
 	psk := []byte(cfg.PSK)
 
 	// Profile manager: generates traffic profiles from target sites
-	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileIntervalDuration())
+	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileIntervalDuration(), cfg.ProfileMinSnapshots)
 
 	// Tunnel handler on tunnel_path, everything else goes to reverse proxy
 	mux := http.NewServeMux()

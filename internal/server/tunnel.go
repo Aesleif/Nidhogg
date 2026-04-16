@@ -12,10 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aesleif/nidhogg/internal/pcap"
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
+
+const minSamplesForSnapshot = 10
 
 // TunnelHandler creates an http.Handler that handles tunnel connections.
 // If the PSK in the request body matches, the connection is tunneled
@@ -52,13 +55,27 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 		dest = strings.TrimSpace(dest)
 
 		// Connect to upstream target
-		upstream, err := net.Dial("tcp", dest)
+		tcpUpstream, err := net.Dial("tcp", dest)
 		if err != nil {
 			slog.Warn("tunnel: failed to dial upstream", "dest", dest, "err", err)
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		defer upstream.Close()
+		defer tcpUpstream.Close()
+
+		startTime := time.Now()
+
+		// Wrap upstream in RecordingConn if dest matches a profile target
+		var recorder *pcap.RecordingConn
+		var recordTarget string
+		upstream := net.Conn(tcpUpstream)
+		if pm != nil {
+			if t, ok := pm.MatchTarget(dest); ok {
+				recorder = pcap.NewRecordingConn(tcpUpstream)
+				recordTarget = t
+				upstream = recorder
+			}
+		}
 
 		// Start streaming response
 		flusher, ok := w.(http.Flusher)
@@ -103,55 +120,65 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 			var wg sync.WaitGroup
 			wg.Add(2)
 
-			// Client → Upstream: decode frames from shaped, write payload to upstream
 			go func() {
 				defer wg.Done()
 				io.Copy(upstream, shaped)
-				if tcpConn, ok := upstream.(*net.TCPConn); ok {
+				if tcpConn, ok := tcpUpstream.(*net.TCPConn); ok {
 					tcpConn.CloseWrite()
 				}
 			}()
 
-			// Upstream → Client: read raw data, encode as shaped frames
 			go func() {
 				defer wg.Done()
 				io.Copy(shaped, upstream)
 			}()
 
 			wg.Wait()
-			return
-		}
+		} else {
+			// Fallback: raw relay without shaping
+			var wg sync.WaitGroup
+			wg.Add(2)
 
-		// Fallback: raw relay without shaping
-		var wg sync.WaitGroup
-		wg.Add(2)
+			go func() {
+				defer wg.Done()
+				io.Copy(upstream, reader)
+				if tc, ok := tcpUpstream.(*net.TCPConn); ok {
+					tc.CloseWrite()
+				}
+			}()
 
-		go func() {
-			defer wg.Done()
-			io.Copy(upstream, reader)
-			if tc, ok := upstream.(*net.TCPConn); ok {
-				tc.CloseWrite()
-			}
-		}()
-
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 32*1024)
-			for {
-				n, readErr := upstream.Read(buf)
-				if n > 0 {
-					if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+			go func() {
+				defer wg.Done()
+				buf := make([]byte, 32*1024)
+				for {
+					n, readErr := upstream.Read(buf)
+					if n > 0 {
+						if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+							return
+						}
+						flusher.Flush()
+					}
+					if readErr != nil {
 						return
 					}
-					flusher.Flush()
 				}
-				if readErr != nil {
-					return
-				}
-			}
-		}()
+			}()
 
-		wg.Wait()
+			wg.Wait()
+		}
+
+		// After relay: feed recorded snapshot to ProfileManager
+		if recorder != nil {
+			samples := recorder.Samples()
+			if len(samples) >= minSamplesForSnapshot {
+				pm.Record(recordTarget, &pcap.TrafficSnapshot{
+					Samples:   samples,
+					Target:    recordTarget,
+					Duration:  time.Since(startTime),
+					CreatedAt: startTime,
+				})
+			}
+		}
 	})
 }
 

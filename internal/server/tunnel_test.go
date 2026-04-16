@@ -106,7 +106,7 @@ func TestTunnelEchoShaped(t *testing.T) {
 	psk := []byte("shaped-psk")
 	echoAddr := startEchoServer(t)
 
-	pm := server.NewProfileManager([]string{"test"}, time.Hour)
+	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
 	pm.Push(makeTestProfile())
 
 	srv := startTunnelServerWithPM(t, psk, pm)
