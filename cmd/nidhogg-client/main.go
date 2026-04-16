@@ -16,7 +16,9 @@ import (
 	"github.com/aesleif/nidhogg/internal/client"
 	"github.com/aesleif/nidhogg/internal/health"
 	"github.com/aesleif/nidhogg/internal/logging"
+	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/shaper"
+	"github.com/aesleif/nidhogg/internal/switcher"
 )
 
 func main() {
@@ -43,6 +45,18 @@ func main() {
 
 	tracker := health.NewTracker()
 
+	sw := switcher.NewSwitcher(5)
+	sw.OnSwitch = func(old, new *profile.Profile) {
+		oldName, newName := "<none>", "<none>"
+		if old != nil {
+			oldName = old.Name
+		}
+		if new != nil {
+			newName = new.Name
+		}
+		slog.Info("profile switched", "from", oldName, "to", newName)
+	}
+
 	srv := socks5.NewServer(
 		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -61,6 +75,7 @@ func main() {
 			tracker.RecordRTT(rtt)
 			if prof != nil {
 				tracker.SetProfile(prof)
+				sw.Push(prof)
 			}
 
 			monitored := health.NewMonitoredConn(conn, rtt, healthCfg, addr)
@@ -78,7 +93,7 @@ func main() {
 			return monitored, nil
 		}),
 	)
-	_ = tracker
+	_, _ = tracker, sw
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
