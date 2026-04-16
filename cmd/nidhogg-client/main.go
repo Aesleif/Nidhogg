@@ -19,6 +19,7 @@ import (
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/switcher"
+	"github.com/aesleif/nidhogg/internal/telemetry"
 )
 
 func main() {
@@ -101,8 +102,18 @@ func main() {
 			return monitored, nil
 		}),
 	)
+	sender := telemetry.NewSender(
+		dialer.ServerURL(), []byte(cfg.PSK), dialer.Client(),
+		cfg.TelemetryIntervalDuration(), tracker, sw,
+	)
+	sender.OnProfile = func(p *profile.Profile) {
+		sw.Push(p)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go sender.Start(ctx)
 
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {

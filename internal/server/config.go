@@ -10,17 +10,18 @@ import (
 )
 
 type Config struct {
-	Listen              string   `json:"listen"`
-	Domain              string   `json:"domain"`
-	PSK                 string   `json:"psk"`
-	ProxyTo             string   `json:"proxy_to"`
-	TunnelPath          string   `json:"tunnel_path"`
-	CertFile            string   `json:"cert_file,omitempty"`
-	KeyFile             string   `json:"key_file,omitempty"`
-	ProfileTargets      []string `json:"profile_targets"`
-	ProfileInterval     string   `json:"profile_interval"`
-	ProfileMinSnapshots int      `json:"profile_min_snapshots"`
-	LogLevel            string   `json:"log_level"`
+	Listen                     string   `json:"listen"`
+	Domain                     string   `json:"domain"`
+	PSK                        string   `json:"psk"`
+	ProxyTo                    string   `json:"proxy_to"`
+	TunnelPath                 string   `json:"tunnel_path"`
+	CertFile                   string   `json:"cert_file,omitempty"`
+	KeyFile                    string   `json:"key_file,omitempty"`
+	ProfileTargets             []string `json:"profile_targets"`
+	ProfileInterval            string   `json:"profile_interval"`
+	ProfileMinSnapshots        int      `json:"profile_min_snapshots"`
+	TelemetryCriticalThreshold int      `json:"telemetry_critical_threshold"`
+	LogLevel                   string   `json:"log_level"`
 }
 
 // ProfileIntervalDuration parses ProfileInterval as a time.Duration.
@@ -70,6 +71,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.ProfileMinSnapshots <= 0 {
 		cfg.ProfileMinSnapshots = 20
+	}
+	if cfg.TelemetryCriticalThreshold <= 0 {
+		cfg.TelemetryCriticalThreshold = 3
 	}
 	if _, err := logging.ParseLevel(cfg.LogLevel); err != nil {
 		return nil, fmt.Errorf("invalid log_level: %w", err)

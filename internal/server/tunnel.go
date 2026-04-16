@@ -15,6 +15,7 @@ import (
 	"github.com/aesleif/nidhogg/internal/pcap"
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/shaper"
+	"github.com/aesleif/nidhogg/internal/telemetry"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
 
@@ -24,7 +25,7 @@ const minSamplesForSnapshot = 10
 // If the PSK in the request body matches, the connection is tunneled
 // to the destination specified by the client. Otherwise, the request
 // is forwarded to the fallback handler (reverse proxy).
-func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.Handler {
+func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *telemetry.Aggregator) http.Handler {
 	validator := transport.NewValidator(psk)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +54,11 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager) http.H
 			return
 		}
 		dest = strings.TrimSpace(dest)
+
+		if dest == "_telemetry" {
+			handleTelemetry(w, reader, pm, agg)
+			return
+		}
 
 		// Connect to upstream target
 		tcpUpstream, err := net.Dial("tcp", dest)
@@ -206,3 +212,48 @@ func (c *serverTunnelConn) RemoteAddr() net.Addr               { return &net.TCP
 func (c *serverTunnelConn) SetDeadline(_ time.Time) error      { return nil }
 func (c *serverTunnelConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *serverTunnelConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func handleTelemetry(w http.ResponseWriter, reader io.Reader, pm *ProfileManager, agg *telemetry.Aggregator) {
+	var report telemetry.Report
+	if err := json.NewDecoder(reader).Decode(&report); err != nil {
+		slog.Warn("tunnel: invalid telemetry", "err", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	slog.Debug("telemetry received", "profile", report.Profile, "status", report.Status, "rtt", report.AvgRTTMs)
+
+	if agg != nil {
+		agg.Record(report)
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Nidhogg-Tunnel", "1")
+	w.WriteHeader(http.StatusOK)
+
+	var activeProfile *profile.Profile
+	if pm != nil {
+		activeProfile = pm.Current()
+	}
+	if activeProfile != nil {
+		profJSON, err := json.Marshal(activeProfile)
+		if err != nil {
+			w.Write([]byte{0, 0, 0, 0})
+			flusher.Flush()
+			return
+		}
+		var sizeBuf [4]byte
+		binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(profJSON)))
+		w.Write(sizeBuf[:])
+		w.Write(profJSON)
+	} else {
+		w.Write([]byte{0, 0, 0, 0})
+	}
+	flusher.Flush()
+}

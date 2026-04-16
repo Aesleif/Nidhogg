@@ -62,6 +62,9 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 	}
 }
 
+func (d *Dialer) Client() *http.Client { return d.client }
+func (d *Dialer) ServerURL() string    { return d.serverURL }
+
 // DialTunnel opens a new tunnel stream to the given destination (host:port)
 // through the nidhogg server. The returned net.Conn represents the
 // bidirectional tunnel. handshakeRTT is the time from request to 200 OK.

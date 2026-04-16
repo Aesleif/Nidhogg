@@ -104,6 +104,14 @@ func (pm *ProfileManager) Current() *profile.Profile {
 	return pm.cache.Current()
 }
 
+// TriggerRegen sends a non-blocking signal to regenerate the profile.
+func (pm *ProfileManager) TriggerRegen() {
+	select {
+	case pm.regenCh <- struct{}{}:
+	default:
+	}
+}
+
 // Push inserts a profile into the cache without collecting. Useful for tests.
 func (pm *ProfileManager) Push(p *profile.Profile) {
 	pm.cache.Push(p)

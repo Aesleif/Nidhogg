@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/shaper"
@@ -21,6 +22,7 @@ type Config struct {
 	LogLevel            string `json:"log_level"`            // "debug", "info" (default), "warn", "error"
 	MaxRTTMs            int    `json:"max_rtt_ms"`           // max handshake RTT in ms, default 2000
 	ConsecutiveFailures int    `json:"consecutive_failures"` // write errors before unhealthy, default 3
+	TelemetryInterval   string `json:"telemetry_interval"`   // e.g. "30s", default "30s"
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -62,6 +64,17 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ConsecutiveFailures <= 0 {
 		cfg.ConsecutiveFailures = 3
 	}
+	if cfg.TelemetryInterval == "" {
+		cfg.TelemetryInterval = "30s"
+	}
 
 	return &cfg, nil
+}
+
+func (c *Config) TelemetryIntervalDuration() time.Duration {
+	d, err := time.ParseDuration(c.TelemetryInterval)
+	if err != nil || d <= 0 {
+		return 30 * time.Second
+	}
+	return d
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/server"
+	"github.com/aesleif/nidhogg/internal/telemetry"
 )
 
 func main() {
@@ -40,9 +41,12 @@ func main() {
 	// Profile manager: generates traffic profiles from target sites
 	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileIntervalDuration(), cfg.ProfileMinSnapshots)
 
+	// Telemetry aggregator
+	agg := telemetry.NewAggregator(pm, cfg.TelemetryCriticalThreshold)
+
 	// Tunnel handler on tunnel_path, everything else goes to reverse proxy
 	mux := http.NewServeMux()
-	tunnelHandler := server.TunnelHandler(psk, proxy, pm)
+	tunnelHandler := server.TunnelHandler(psk, proxy, pm, agg)
 	mux.Handle(cfg.TunnelPath, tunnelHandler)
 	if cfg.TunnelPath != "/" {
 		mux.Handle("/", proxy)
