@@ -55,6 +55,9 @@ func main() {
 			newName = new.Name
 		}
 		slog.Info("profile switched", "from", oldName, "to", newName)
+		if new != nil {
+			dialer.ProfileOverride.Store(new)
+		}
 	}
 
 	srv := socks5.NewServer(
@@ -85,6 +88,11 @@ func main() {
 					"write_errors", stats.WriteErrors,
 					"read_timeouts", stats.ReadTimeouts,
 					"avg_write_latency", stats.AvgWriteLatency)
+
+				if tracker.AggregateLevel() == health.Critical {
+					slog.Warn("aggregate health critical, switching profile")
+					sw.Switch()
+				}
 			}
 			tracker.TrackConn(monitored)
 			monitored.OnClose = func() {
@@ -93,8 +101,6 @@ func main() {
 			return monitored, nil
 		}),
 	)
-	_, _ = tracker, sw
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

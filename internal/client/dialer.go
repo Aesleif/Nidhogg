@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -23,10 +24,11 @@ import (
 // tunnel streams. A single Dialer multiplexes all tunnels over one
 // TLS connection via HTTP/2 streams.
 type Dialer struct {
-	serverURL   string
-	psk         []byte
-	client      *http.Client
-	shapingMode shaper.ShapingMode
+	serverURL       string
+	psk             []byte
+	client          *http.Client
+	shapingMode     shaper.ShapingMode
+	ProfileOverride atomic.Pointer[profile.Profile]
 }
 
 // NewDialer creates a Dialer for the given server configuration.
@@ -145,8 +147,13 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 		writer: pw,
 	}
 
-	if prof != nil && d.shapingMode != shaper.Disabled {
-		return shaper.NewShapedConn(baseConn, prof, d.shapingMode), prof, handshakeRTT, nil
+	activeProf := d.ProfileOverride.Load()
+	if activeProf == nil {
+		activeProf = prof
+	}
+
+	if activeProf != nil && d.shapingMode != shaper.Disabled {
+		return shaper.NewShapedConn(baseConn, activeProf, d.shapingMode), prof, handshakeRTT, nil
 	}
 	return baseConn, prof, handshakeRTT, nil
 }
