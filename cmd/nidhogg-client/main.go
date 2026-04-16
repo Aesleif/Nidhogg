@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/things-go/go-socks5"
 
 	"github.com/aesleif/nidhogg/internal/client"
+	"github.com/aesleif/nidhogg/internal/health"
 	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/shaper"
 )
@@ -32,21 +34,29 @@ func main() {
 	shapingMode, _ := shaper.ParseMode(cfg.ShapingMode) // already validated in LoadConfig
 	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint, shapingMode)
 
+	healthCfg := health.Config{
+		MaxHandshakeRTT:     time.Duration(cfg.MaxRTTMs) * time.Millisecond,
+		MaxWriteLatency:     5 * time.Second,
+		ConsecutiveFailures: cfg.ConsecutiveFailures,
+		ReadTimeoutLimit:    3,
+	}
+
 	srv := socks5.NewServer(
 		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 			slog.Debug("SOCKS5 CONNECT", "addr", addr)
-			conn, prof, err := dialer.DialTunnel(ctx, addr)
+			conn, prof, rtt, err := dialer.DialTunnel(ctx, addr)
 			if err != nil {
 				slog.Error("tunnel dial failed", "addr", addr, "err", err)
 				return nil, err
 			}
 			if prof != nil {
-				slog.Debug("tunnel established", "addr", addr, "profile", prof.Name)
+				slog.Debug("tunnel established", "addr", addr, "profile", prof.Name, "rtt", rtt)
 			} else {
-				slog.Debug("tunnel established", "addr", addr, "profile", "none")
+				slog.Debug("tunnel established", "addr", addr, "profile", "none", "rtt", rtt)
 			}
-			return conn, nil
+			monitored := health.NewMonitoredConn(conn, rtt, healthCfg, addr)
+			return monitored, nil
 		}),
 	)
 

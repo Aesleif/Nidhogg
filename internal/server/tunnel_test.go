@@ -112,7 +112,7 @@ func TestTunnelEchoShaped(t *testing.T) {
 	srv := startTunnelServerWithPM(t, psk, pm)
 	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Balanced)
 
-	conn, prof, err := dialer.DialTunnel(context.Background(), echoAddr)
+	conn, prof, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
 		t.Fatalf("DialTunnel: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestTunnelEcho(t *testing.T) {
 	srv := startTunnelServer(t, psk)
 	dialer := newTestDialer(t, srv, psk)
 
-	conn, _, err := dialer.DialTunnel(context.Background(), echoAddr)
+	conn, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
 		t.Fatalf("DialTunnel: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestTunnelWrongPSK(t *testing.T) {
 	srv := startTunnelServer(t, psk)
 	dialer := newTestDialer(t, srv, []byte("wrong-psk-key"))
 
-	_, _, err := dialer.DialTunnel(context.Background(), "127.0.0.1:9999")
+	_, _, _, err := dialer.DialTunnel(context.Background(), "127.0.0.1:9999")
 	if err == nil {
 		t.Fatal("expected error with wrong PSK, got nil")
 	}
@@ -194,7 +194,7 @@ func TestTunnelMultiplex(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 
-			conn, _, err := dialer.DialTunnel(context.Background(), echoAddr)
+			conn, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 			if err != nil {
 				errors <- err
 				return
@@ -233,7 +233,7 @@ func TestTunnelLargeTransfer(t *testing.T) {
 	srv := startTunnelServer(t, psk)
 	dialer := newTestDialer(t, srv, psk)
 
-	conn, _, err := dialer.DialTunnel(context.Background(), echoAddr)
+	conn, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
 		t.Fatalf("DialTunnel: %v", err)
 	}

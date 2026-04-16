@@ -11,14 +11,16 @@ import (
 )
 
 type Config struct {
-	Server      string `json:"server"`
-	PSK         string `json:"psk"`
-	Listen      string `json:"listen"`
-	TunnelPath  string `json:"tunnel_path"`
-	Insecure    bool   `json:"insecure"`
-	Fingerprint string `json:"fingerprint"`  // "randomized" (default), "chrome", "firefox", "safari"
-	ShapingMode string `json:"shaping_mode"` // "", "stream", "balanced", "stealth"
-	LogLevel    string `json:"log_level"`    // "debug", "info" (default), "warn", "error"
+	Server              string `json:"server"`
+	PSK                 string `json:"psk"`
+	Listen              string `json:"listen"`
+	TunnelPath          string `json:"tunnel_path"`
+	Insecure            bool   `json:"insecure"`
+	Fingerprint         string `json:"fingerprint"`          // "randomized" (default), "chrome", "firefox", "safari"
+	ShapingMode         string `json:"shaping_mode"`         // "", "stream", "balanced", "stealth"
+	LogLevel            string `json:"log_level"`            // "debug", "info" (default), "warn", "error"
+	MaxRTTMs            int    `json:"max_rtt_ms"`           // max handshake RTT in ms, default 2000
+	ConsecutiveFailures int    `json:"consecutive_failures"` // write errors before unhealthy, default 3
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -53,6 +55,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if _, err := logging.ParseLevel(cfg.LogLevel); err != nil {
 		return nil, fmt.Errorf("invalid log_level: %w", err)
+	}
+	if cfg.MaxRTTMs <= 0 {
+		cfg.MaxRTTMs = 2000
+	}
+	if cfg.ConsecutiveFailures <= 0 {
+		cfg.ConsecutiveFailures = 3
 	}
 
 	return &cfg, nil

@@ -62,8 +62,8 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 
 // DialTunnel opens a new tunnel stream to the given destination (host:port)
 // through the nidhogg server. The returned net.Conn represents the
-// bidirectional tunnel.
-func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profile.Profile, error) {
+// bidirectional tunnel. handshakeRTT is the time from request to 200 OK.
+func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profile.Profile, time.Duration, error) {
 	pr, pw := io.Pipe()
 
 	// Write PSK and destination before HTTP request is sent.
@@ -90,28 +90,30 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.serverURL, pr)
 	if err != nil {
 		pw.Close()
-		return nil, nil, fmt.Errorf("create request: %w", err)
+		return nil, nil, 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
+	dialStart := time.Now()
 	resp, err := d.client.Do(req)
 	if err != nil {
 		pw.Close()
-		return nil, nil, fmt.Errorf("request failed: %w", err)
+		return nil, nil, 0, fmt.Errorf("request failed: %w", err)
 	}
+	handshakeRTT := time.Since(dialStart)
 
 	// Check if header write succeeded
 	if writeErr := <-headerWritten; writeErr != nil {
 		resp.Body.Close()
 		pw.Close()
-		return nil, nil, writeErr
+		return nil, nil, 0, writeErr
 	}
 
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Nidhogg-Tunnel") != "1" {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		pw.Close()
-		return nil, nil, fmt.Errorf("tunnel rejected (status %d): %s", resp.StatusCode, string(body))
+		return nil, nil, 0, fmt.Errorf("tunnel rejected (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	// Read inline profile: [size:4B] [json]
@@ -120,7 +122,7 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	if _, err := io.ReadFull(resp.Body, sizeBuf[:]); err != nil {
 		resp.Body.Close()
 		pw.Close()
-		return nil, nil, fmt.Errorf("read profile size: %w", err)
+		return nil, nil, 0, fmt.Errorf("read profile size: %w", err)
 	}
 	profSize := binary.BigEndian.Uint32(sizeBuf[:])
 	if profSize > 0 {
@@ -128,13 +130,13 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 		if _, err := io.ReadFull(resp.Body, profJSON); err != nil {
 			resp.Body.Close()
 			pw.Close()
-			return nil, nil, fmt.Errorf("read profile data: %w", err)
+			return nil, nil, 0, fmt.Errorf("read profile data: %w", err)
 		}
 		prof = &profile.Profile{}
 		if err := json.Unmarshal(profJSON, prof); err != nil {
 			resp.Body.Close()
 			pw.Close()
-			return nil, nil, fmt.Errorf("parse profile: %w", err)
+			return nil, nil, 0, fmt.Errorf("parse profile: %w", err)
 		}
 	}
 
@@ -144,9 +146,9 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	}
 
 	if prof != nil && d.shapingMode != shaper.Disabled {
-		return shaper.NewShapedConn(baseConn, prof, d.shapingMode), prof, nil
+		return shaper.NewShapedConn(baseConn, prof, d.shapingMode), prof, handshakeRTT, nil
 	}
-	return baseConn, prof, nil
+	return baseConn, prof, handshakeRTT, nil
 }
 
 // tunnelConn adapts an HTTP/2 streaming response into a net.Conn.
