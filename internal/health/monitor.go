@@ -46,6 +46,7 @@ type MonitoredConn struct {
 	dest         string
 
 	OnDegradation func(DegradationLevel, ConnStats)
+	OnClose       func()
 
 	mu           sync.Mutex
 	writeErrors  int
@@ -132,6 +133,9 @@ func (c *MonitoredConn) Close() error {
 		"read_timeouts", stats.ReadTimeouts,
 		"avg_write_latency", stats.AvgWriteLatency,
 	)
+	if c.OnClose != nil {
+		c.OnClose()
+	}
 	return c.Conn.Close()
 }
 

@@ -41,6 +41,8 @@ func main() {
 		ReadTimeoutLimit:    3,
 	}
 
+	tracker := health.NewTracker()
+
 	srv := socks5.NewServer(
 		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -55,6 +57,12 @@ func main() {
 			} else {
 				slog.Debug("tunnel established", "addr", addr, "profile", "none", "rtt", rtt)
 			}
+
+			tracker.RecordRTT(rtt)
+			if prof != nil {
+				tracker.SetProfile(prof)
+			}
+
 			monitored := health.NewMonitoredConn(conn, rtt, healthCfg, addr)
 			monitored.OnDegradation = func(level health.DegradationLevel, stats health.ConnStats) {
 				slog.Warn("tunnel health changed",
@@ -63,9 +71,14 @@ func main() {
 					"read_timeouts", stats.ReadTimeouts,
 					"avg_write_latency", stats.AvgWriteLatency)
 			}
+			tracker.TrackConn(monitored)
+			monitored.OnClose = func() {
+				tracker.UntrackConn(monitored)
+			}
 			return monitored, nil
 		}),
 	)
+	_ = tracker
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
