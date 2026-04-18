@@ -40,19 +40,18 @@ func GenerateHandshake(psk []byte) ([]byte, error) {
 // HandshakeValidator validates handshake markers on the server side.
 // It is safe for concurrent use.
 type HandshakeValidator struct {
-	psk        []byte
-	nonces     [nonceRingSize][nonceSize]byte
-	nonceIdx   int
-	nonceCount int
-	mu         sync.Mutex
-	now        func() time.Time
+	psk    []byte
+	nonces map[[nonceSize]byte]int64 // nonce → timestamp_ms
+	mu     sync.Mutex
+	now    func() time.Time
 }
 
 // NewValidator creates a new HandshakeValidator with the given PSK.
 func NewValidator(psk []byte) *HandshakeValidator {
 	return &HandshakeValidator{
-		psk: psk,
-		now: time.Now,
+		psk:    psk,
+		nonces: make(map[[nonceSize]byte]int64),
+		now:    time.Now,
 	}
 }
 
@@ -88,27 +87,27 @@ func (v *HandshakeValidator) Validate(data []byte) (bool, error) {
 		return false, errors.New("HMAC mismatch")
 	}
 
-	// Check nonce replay
+	// Check nonce replay (O(1) map lookup)
 	var nonce [nonceSize]byte
 	copy(nonce[:], data[9:25])
 
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	count := v.nonceCount
-	if count > nonceRingSize {
-		count = nonceRingSize
-	}
-	for i := 0; i < count; i++ {
-		if v.nonces[i] == nonce {
-			return false, errors.New("nonce reused")
-		}
+	if _, exists := v.nonces[nonce]; exists {
+		return false, errors.New("nonce reused")
 	}
 
-	v.nonces[v.nonceIdx%nonceRingSize] = nonce
-	v.nonceIdx++
-	if v.nonceCount < nonceRingSize {
-		v.nonceCount++
+	v.nonces[nonce] = int64(tsMs)
+
+	// Evict expired nonces when map grows too large
+	if len(v.nonces) > nonceRingSize {
+		cutoff := v.now().Add(-2 * maxClockSkew).UnixMilli()
+		for k, ts := range v.nonces {
+			if ts < cutoff {
+				delete(v.nonces, k)
+			}
+		}
 	}
 
 	return true, nil

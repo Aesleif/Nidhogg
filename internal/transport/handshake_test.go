@@ -144,35 +144,56 @@ func TestWrongVersion(t *testing.T) {
 	}
 }
 
-func TestNonceRingWraparound(t *testing.T) {
+func TestNonceTimeEviction(t *testing.T) {
 	psk := []byte("ring-test-key")
 	v := NewValidator(psk)
 
-	// Save the first handshake
+	baseTime := time.Now()
+	v.now = func() time.Time { return baseTime }
+
+	// Validate first handshake
 	first, _ := GenerateHandshake(psk)
 	ok, _ := v.Validate(first)
 	if !ok {
 		t.Fatal("first handshake should pass")
 	}
 
-	// Fill the ring buffer with new handshakes
-	for i := 0; i < nonceRingSize; i++ {
+	// Replay should be rejected while nonce is in the map
+	ok, err := v.Validate(first)
+	if ok {
+		t.Fatal("immediate replay should be rejected")
+	}
+	if err.Error() != "nonce reused" {
+		t.Fatalf("expected nonce reused, got: %v", err)
+	}
+
+	// Fill past nonceRingSize to trigger eviction sweep
+	for i := 0; i < nonceRingSize+1; i++ {
 		data, _ := GenerateHandshake(psk)
 		v.Validate(data)
 	}
 
-	// The first nonce should now be evicted — replay should pass
-	// (need to fix timestamp since time may have passed)
-	// Re-generate with same nonce by copying it
+	// Advance time past 2*maxClockSkew so old nonces expire
+	v.now = func() time.Time { return baseTime.Add(3 * maxClockSkew) }
+
+	// Insert one more to trigger eviction of expired entries
+	trigger, _ := GenerateHandshake(psk)
+	// Fix timestamp to match the new "now"
+	binary.BigEndian.PutUint64(trigger[1:9], uint64(v.now().UnixMilli()))
+	mac := hmac.New(sha256.New, psk)
+	mac.Write(trigger[0:25])
+	copy(trigger[25:57], mac.Sum(nil))
+	v.Validate(trigger)
+
+	// Now reuse the first nonce with a fresh timestamp — should be accepted
 	fresh, _ := GenerateHandshake(psk)
 	copy(fresh[9:25], first[9:25]) // reuse nonce from first
-
-	// Recompute HMAC with the new timestamp but old nonce
-	mac := hmac.New(sha256.New, psk)
+	binary.BigEndian.PutUint64(fresh[1:9], uint64(v.now().UnixMilli()))
+	mac = hmac.New(sha256.New, psk)
 	mac.Write(fresh[0:25])
 	copy(fresh[25:57], mac.Sum(nil))
 
-	ok, err := v.Validate(fresh)
+	ok, err = v.Validate(fresh)
 	if !ok {
 		t.Fatalf("evicted nonce should be accepted, got: %v", err)
 	}

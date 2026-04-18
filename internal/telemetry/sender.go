@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -77,25 +78,19 @@ func (s *Sender) Start(ctx context.Context) {
 }
 
 func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, error) {
-	pr, pw := io.Pipe()
+	// Build header synchronously
+	var header bytes.Buffer
+	marker, err := transport.GenerateHandshake(s.psk)
+	if err != nil {
+		return nil, fmt.Errorf("generate handshake: %w", err)
+	}
+	header.Write(marker)
+	if err := transport.WriteDest(&header, transport.Destination{Command: transport.CommandTelemetry}); err != nil {
+		return nil, fmt.Errorf("write destination: %w", err)
+	}
+	json.NewEncoder(&header).Encode(report)
 
-	go func() {
-		defer pw.Close()
-		marker, err := transport.GenerateHandshake(s.psk)
-		if err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-		if _, err := pw.Write(marker); err != nil {
-			return
-		}
-		if err := transport.WriteDest(pw, transport.Destination{Command: transport.CommandTelemetry}); err != nil {
-			return
-		}
-		json.NewEncoder(pw).Encode(report)
-	}()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL, &header)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

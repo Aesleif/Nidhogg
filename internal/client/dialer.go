@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -69,35 +70,25 @@ func (d *Dialer) ServerURL() string    { return d.serverURL }
 // through the nidhogg server. The returned net.Conn represents the
 // bidirectional tunnel. handshakeRTT is the time from request to 200 OK.
 func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profile.Profile, time.Duration, error) {
+	// Build header synchronously: handshake + destination
+	var header bytes.Buffer
+	marker, err := transport.GenerateHandshake(d.psk)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("generate handshake: %w", err)
+	}
+	header.Write(marker)
+	dd, err := transport.ParseDestination(dest)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("parse destination: %w", err)
+	}
+	if err := transport.WriteDest(&header, dd); err != nil {
+		return nil, nil, 0, fmt.Errorf("write destination: %w", err)
+	}
+
 	pr, pw := io.Pipe()
+	body := io.MultiReader(&header, pr)
 
-	// Write PSK and destination before HTTP request is sent.
-	// This must happen in a goroutine because pw.Write blocks
-	// until the HTTP client reads from pr.
-	headerWritten := make(chan error, 1)
-	go func() {
-		marker, err := transport.GenerateHandshake(d.psk)
-		if err != nil {
-			headerWritten <- fmt.Errorf("generate handshake: %w", err)
-			return
-		}
-		if _, err := pw.Write(marker); err != nil {
-			headerWritten <- fmt.Errorf("write handshake: %w", err)
-			return
-		}
-		d, err := transport.ParseDestination(dest)
-		if err != nil {
-			headerWritten <- fmt.Errorf("parse destination: %w", err)
-			return
-		}
-		if err := transport.WriteDest(pw, d); err != nil {
-			headerWritten <- fmt.Errorf("write destination: %w", err)
-			return
-		}
-		headerWritten <- nil
-	}()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.serverURL, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.serverURL, body)
 	if err != nil {
 		pw.Close()
 		return nil, nil, 0, fmt.Errorf("create request: %w", err)
@@ -111,13 +102,6 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 		return nil, nil, 0, fmt.Errorf("request failed: %w", err)
 	}
 	handshakeRTT := time.Since(dialStart)
-
-	// Check if header write succeeded
-	if writeErr := <-headerWritten; writeErr != nil {
-		resp.Body.Close()
-		pw.Close()
-		return nil, nil, 0, writeErr
-	}
 
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Nidhogg-Tunnel") != "1" {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

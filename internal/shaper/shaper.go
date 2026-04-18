@@ -57,7 +57,15 @@ const (
 	frameOverhead  = frameSizeLen + payloadLenSize
 	minFrameSize   = frameOverhead + 1 // at least 1 byte of payload
 	maxPayload     = 65535 - payloadLenSize
+	poolBufCap     = 16384 // default capacity for pooled buffers
 )
+
+var framePool = sync.Pool{
+	New: func() any {
+		b := make([]byte, poolBufCap)
+		return &b
+	},
+}
 
 // ShapedConn wraps a net.Conn with traffic shaping based on a Profile.
 type ShapedConn struct {
@@ -161,14 +169,28 @@ func (c *ShapedConn) writeFrame(payload []byte, targetSize int) error {
 	}
 
 	frameContentSize := payloadLenSize + len(payload) + paddingLen // frame_size value
+	totalLen := frameSizeLen + frameContentSize
 
-	frame := make([]byte, frameSizeLen+frameContentSize)
+	bp := framePool.Get().(*[]byte)
+	frame := *bp
+	if cap(frame) < totalLen {
+		frame = make([]byte, totalLen)
+	} else {
+		frame = frame[:totalLen]
+		// Zero padding region
+		for i := frameSizeLen + payloadLenSize + len(payload); i < totalLen; i++ {
+			frame[i] = 0
+		}
+	}
+
 	binary.BigEndian.PutUint16(frame[0:2], uint16(frameContentSize))
 	binary.BigEndian.PutUint16(frame[2:4], uint16(len(payload)))
 	copy(frame[4:], payload)
-	// padding bytes are already zero
 
 	_, err := c.Conn.Write(frame)
+
+	*bp = frame
+	framePool.Put(bp)
 	return err
 }
 
@@ -185,21 +207,34 @@ func (c *ShapedConn) readFrame() ([]byte, error) {
 		return nil, fmt.Errorf("frame content size too small: %d", frameContentSize)
 	}
 
-	// Read entire frame content
-	content := make([]byte, frameContentSize)
+	// Read entire frame content into pooled buffer
+	bp := framePool.Get().(*[]byte)
+	content := *bp
+	if cap(content) < frameContentSize {
+		content = make([]byte, frameContentSize)
+	} else {
+		content = content[:frameContentSize]
+	}
+
 	if _, err := io.ReadFull(c.Conn, content); err != nil {
+		*bp = content
+		framePool.Put(bp)
 		return nil, fmt.Errorf("read frame content: %w", err)
 	}
 
 	payloadLen := int(binary.BigEndian.Uint16(content[0:2]))
 	if payloadLen > frameContentSize-payloadLenSize {
+		*bp = content
+		framePool.Put(bp)
 		return nil, fmt.Errorf("payload length %d exceeds frame content %d", payloadLen, frameContentSize)
 	}
 
+	// Copy payload out before returning buffer to pool
 	payload := make([]byte, payloadLen)
 	copy(payload, content[payloadLenSize:payloadLenSize+payloadLen])
-	// Rest is padding — discard
 
+	*bp = content
+	framePool.Put(bp)
 	return payload, nil
 }
 
