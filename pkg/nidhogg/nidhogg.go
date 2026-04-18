@@ -80,6 +80,9 @@ func WriteDest(w io.Writer, d Destination) error { return transport.WriteDest(w,
 // ReadDest reads a binary-encoded Destination from r.
 func ReadDest(r io.Reader) (Destination, error) { return transport.ReadDest(r) }
 
+// ProfileVersionHash computes a CRC32 version hash from serialized profile JSON.
+func ProfileVersionHash(data []byte) uint32 { return profile.VersionHash(data) }
+
 // toInternalMode converts the public ShapingMode to the internal shaper.ShapingMode.
 func toInternalMode(m ShapingMode) shaper.ShapingMode {
 	switch m {

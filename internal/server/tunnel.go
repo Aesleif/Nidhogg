@@ -54,8 +54,17 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 			return
 		}
 
+		// Read client's known profile version
+		var clientVersionBuf [4]byte
+		if _, err := io.ReadFull(reader, clientVersionBuf[:]); err != nil {
+			slog.Warn("tunnel: failed to read profile version", "err", err)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		clientVersion := binary.BigEndian.Uint32(clientVersionBuf[:])
+
 		if d.Command == transport.CommandTelemetry {
-			handleTelemetry(w, reader, pm, agg)
+			handleTelemetry(w, reader, pm, agg, clientVersion)
 			return
 		}
 
@@ -97,26 +106,9 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
-		// Send profile inline: [size:4B big-endian] [json]
-		var activeProfile *profile.Profile
-		if pm != nil {
-			activeProfile = pm.Current()
-		}
-		if activeProfile != nil {
-			profJSON, err := json.Marshal(activeProfile)
-			if err != nil {
-				slog.Error("tunnel: failed to marshal profile", "err", err)
-				activeProfile = nil
-				w.Write([]byte{0, 0, 0, 0})
-			} else {
-				var sizeBuf [4]byte
-				binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(profJSON)))
-				w.Write(sizeBuf[:])
-				w.Write(profJSON)
-			}
-		} else {
-			w.Write([]byte{0, 0, 0, 0})
-		}
+		// Send profile inline: [version:4B] [size:4B] [json]
+		// If client already has this version, skip JSON payload.
+		activeProfile, _ := writeProfileResponse(w, pm, clientVersion)
 		flusher.Flush()
 
 		// UDP relay: frame datagrams without shaping
@@ -222,7 +214,49 @@ func (c *serverTunnelConn) SetDeadline(_ time.Time) error      { return nil }
 func (c *serverTunnelConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *serverTunnelConn) SetWriteDeadline(_ time.Time) error { return nil }
 
-func handleTelemetry(w http.ResponseWriter, reader io.Reader, pm *ProfileManager, agg *telemetry.Aggregator) {
+// writeProfileResponse writes [version:4B][size:4B][json?] to w.
+// If clientVersion matches the current profile, size=0 and json is omitted.
+// Returns the active profile (if any) and the version sent.
+func writeProfileResponse(w io.Writer, pm *ProfileManager, clientVersion uint32) (*profile.Profile, uint32) {
+	var activeProfile *profile.Profile
+	if pm != nil {
+		activeProfile = pm.Current()
+	}
+
+	var versionBuf [4]byte
+	if activeProfile == nil {
+		// No profile: version=0, size=0
+		w.Write(versionBuf[:]) // version = 0
+		w.Write(versionBuf[:]) // size = 0
+		return nil, 0
+	}
+
+	profJSON, err := json.Marshal(activeProfile)
+	if err != nil {
+		slog.Error("tunnel: failed to marshal profile", "err", err)
+		w.Write(versionBuf[:]) // version = 0
+		w.Write(versionBuf[:]) // size = 0
+		return nil, 0
+	}
+
+	version := profile.VersionHash(profJSON)
+	binary.BigEndian.PutUint32(versionBuf[:], version)
+	w.Write(versionBuf[:])
+
+	if clientVersion == version {
+		// Client already has this version — skip JSON
+		w.Write([]byte{0, 0, 0, 0})
+		return activeProfile, version
+	}
+
+	var sizeBuf [4]byte
+	binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(profJSON)))
+	w.Write(sizeBuf[:])
+	w.Write(profJSON)
+	return activeProfile, version
+}
+
+func handleTelemetry(w http.ResponseWriter, reader io.Reader, pm *ProfileManager, agg *telemetry.Aggregator, clientVersion uint32) {
 	var report telemetry.Report
 	if err := json.NewDecoder(reader).Decode(&report); err != nil {
 		slog.Warn("tunnel: invalid telemetry", "err", err)
@@ -246,23 +280,6 @@ func handleTelemetry(w http.ResponseWriter, reader io.Reader, pm *ProfileManager
 	w.Header().Set("X-Nidhogg-Tunnel", "1")
 	w.WriteHeader(http.StatusOK)
 
-	var activeProfile *profile.Profile
-	if pm != nil {
-		activeProfile = pm.Current()
-	}
-	if activeProfile != nil {
-		profJSON, err := json.Marshal(activeProfile)
-		if err != nil {
-			w.Write([]byte{0, 0, 0, 0})
-			flusher.Flush()
-			return
-		}
-		var sizeBuf [4]byte
-		binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(profJSON)))
-		w.Write(sizeBuf[:])
-		w.Write(profJSON)
-	} else {
-		w.Write([]byte{0, 0, 0, 0})
-	}
+	writeProfileResponse(w, pm, clientVersion)
 	flusher.Flush()
 }

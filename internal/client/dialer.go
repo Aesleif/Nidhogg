@@ -29,6 +29,7 @@ type Dialer struct {
 	psk             []byte
 	client          *http.Client
 	shapingMode     shaper.ShapingMode
+	profileVersion  atomic.Uint32
 	ProfileOverride atomic.Pointer[profile.Profile]
 }
 
@@ -84,6 +85,10 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	if err := transport.WriteDest(&header, dd); err != nil {
 		return nil, nil, 0, fmt.Errorf("write destination: %w", err)
 	}
+	// Write known profile version so server can skip unchanged profiles
+	var knownVersionBuf [4]byte
+	binary.BigEndian.PutUint32(knownVersionBuf[:], d.profileVersion.Load())
+	header.Write(knownVersionBuf[:])
 
 	pr, pw := io.Pipe()
 	body := io.MultiReader(&header, pr)
@@ -105,33 +110,45 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Nidhogg-Tunnel") != "1" {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		resp.Body.Close()
 		pw.Close()
+		resp.Body.Close()
 		return nil, nil, 0, fmt.Errorf("tunnel rejected (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	// Read inline profile: [size:4B] [json]
+	// Read inline profile: [version:4B] [size:4B] [json?]
 	var prof *profile.Profile
+	var versionBuf [4]byte
+	if _, err := io.ReadFull(resp.Body, versionBuf[:]); err != nil {
+		pw.Close()
+		resp.Body.Close()
+		return nil, nil, 0, fmt.Errorf("read profile version: %w", err)
+	}
+	serverVersion := binary.BigEndian.Uint32(versionBuf[:])
+
 	var sizeBuf [4]byte
 	if _, err := io.ReadFull(resp.Body, sizeBuf[:]); err != nil {
-		resp.Body.Close()
 		pw.Close()
+		resp.Body.Close()
 		return nil, nil, 0, fmt.Errorf("read profile size: %w", err)
 	}
 	profSize := binary.BigEndian.Uint32(sizeBuf[:])
 	if profSize > 0 {
 		profJSON := make([]byte, profSize)
 		if _, err := io.ReadFull(resp.Body, profJSON); err != nil {
-			resp.Body.Close()
 			pw.Close()
+			resp.Body.Close()
 			return nil, nil, 0, fmt.Errorf("read profile data: %w", err)
 		}
 		prof = &profile.Profile{}
 		if err := json.Unmarshal(profJSON, prof); err != nil {
-			resp.Body.Close()
 			pw.Close()
+			resp.Body.Close()
 			return nil, nil, 0, fmt.Errorf("parse profile: %w", err)
 		}
+		d.profileVersion.Store(serverVersion)
+	} else if serverVersion != 0 {
+		// Server has a profile but version matches — we already have it
+		d.profileVersion.Store(serverVersion)
 	}
 
 	baseConn := &tunnelConn{

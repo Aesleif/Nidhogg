@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/server"
 	"github.com/aesleif/nidhogg/internal/telemetry"
 	"github.com/aesleif/nidhogg/internal/transport"
@@ -150,18 +151,18 @@ func HandshakeSize() int {
 	return transport.HandshakeSize
 }
 
-// CurrentProfileJSON returns the current traffic profile as JSON bytes.
-// Returns nil if no profile is available.
-func (s *Server) CurrentProfileJSON() []byte {
+// CurrentProfileJSON returns the current traffic profile as JSON bytes and its version hash.
+// Returns (nil, 0) if no profile is available.
+func (s *Server) CurrentProfileJSON() ([]byte, uint32) {
 	prof := s.pm.Current()
 	if prof == nil {
-		return nil
+		return nil, 0
 	}
 	data, err := json.Marshal(prof)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
-	return data
+	return data, profile.VersionHash(data)
 }
 
 // RecordTelemetry records a health report from a client.

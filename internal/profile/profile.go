@@ -1,6 +1,9 @@
 package profile
 
-import "time"
+import (
+	"hash/crc32"
+	"time"
+)
 
 // CDFPoint represents a single point on a cumulative distribution function.
 type CDFPoint struct {
@@ -25,4 +28,9 @@ type Profile struct {
 	TimingCDF   []CDFPoint    `json:"timing_cdf"`
 	AvgBurstLen int           `json:"avg_burst_len"`
 	BurstPause  DurationRange `json:"burst_pause"`
+}
+
+// VersionHash computes a CRC32 version hash from serialized profile JSON.
+func VersionHash(profileJSON []byte) uint32 {
+	return crc32.ChecksumIEEE(profileJSON)
 }

@@ -25,13 +25,14 @@ type ProfileSource interface {
 }
 
 type Sender struct {
-	serverURL string
-	psk       []byte
-	client    *http.Client
-	interval  time.Duration
-	tracker   TrackerSource
-	switcher  ProfileSource
-	OnProfile func(*profile.Profile)
+	serverURL      string
+	psk            []byte
+	client         *http.Client
+	interval       time.Duration
+	tracker        TrackerSource
+	switcher       ProfileSource
+	profileVersion uint32
+	OnProfile      func(*profile.Profile)
 }
 
 func NewSender(serverURL string, psk []byte, client *http.Client, interval time.Duration, tracker TrackerSource, sw ProfileSource) *Sender {
@@ -88,6 +89,9 @@ func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, err
 	if err := transport.WriteDest(&header, transport.Destination{Command: transport.CommandTelemetry}); err != nil {
 		return nil, fmt.Errorf("write destination: %w", err)
 	}
+	var knownVersionBuf [4]byte
+	binary.BigEndian.PutUint32(knownVersionBuf[:], s.profileVersion)
+	header.Write(knownVersionBuf[:])
 	json.NewEncoder(&header).Encode(report)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL, &header)
@@ -106,12 +110,22 @@ func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, err
 		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
 	}
 
+	// Read profile response: [version:4B] [size:4B] [json?]
+	var versionBuf [4]byte
+	if _, err := io.ReadFull(resp.Body, versionBuf[:]); err != nil {
+		return nil, fmt.Errorf("read profile version: %w", err)
+	}
+	serverVersion := binary.BigEndian.Uint32(versionBuf[:])
+
 	var sizeBuf [4]byte
 	if _, err := io.ReadFull(resp.Body, sizeBuf[:]); err != nil {
 		return nil, fmt.Errorf("read profile size: %w", err)
 	}
 	profSize := binary.BigEndian.Uint32(sizeBuf[:])
 	if profSize == 0 {
+		if serverVersion != 0 {
+			s.profileVersion = serverVersion
+		}
 		return nil, nil
 	}
 
@@ -123,5 +137,6 @@ func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, err
 	if err := json.Unmarshal(profJSON, prof); err != nil {
 		return nil, fmt.Errorf("parse profile: %w", err)
 	}
+	s.profileVersion = serverVersion
 	return prof, nil
 }
