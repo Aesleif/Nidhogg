@@ -35,7 +35,7 @@ If you discover a security vulnerability, please report it responsibly:
 
 ### Known limitations
 
-- **Not a VPN** &mdash; Nidhogg is a SOCKS5 proxy, not a system-wide tunnel. Applications must be configured to use it.
+- **Not a VPN** &mdash; Standalone Nidhogg is a SOCKS5 proxy. When integrated with Xray-core, it can work as a system-wide transparent proxy (tproxy), but this depends on the framework configuration.
 - **Single PSK** &mdash; All clients authenticate with the same key. There is no per-user authentication or access control.
 - **Profile quality** &mdash; Traffic shaping effectiveness depends on how closely the profile targets match real browsing patterns. Poor target selection reduces evasion quality.
 - **No forward secrecy beyond TLS** &mdash; The PSK is static; if compromised, past and future handshakes can be identified (though TLS provides its own forward secrecy for the data channel).

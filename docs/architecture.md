@@ -16,8 +16,12 @@ internal/
   telemetry/          Client-server health reporting
   switcher/           Profile cache with atomic switching
   logging/            Structured logging (slog)
+  udprelay/           UDP datagram framing for UoT
   client/             Dialer, client config
   server/             Tunnel handler, reverse proxy, profile manager, server config
+
+pkg/
+  nidhogg/            Public API for external consumers (Xray-core, sing-box)
 ```
 
 ## Package dependencies
@@ -28,10 +32,14 @@ cmd/nidhogg-client
   -> health
   -> switcher -> profile
   -> telemetry -> health, profile, transport
+  -> udprelay
 
 cmd/nidhogg-server
-  -> server -> transport, profile, shaper, pcap, telemetry
+  -> server -> transport, profile, shaper, pcap, telemetry, udprelay
   -> telemetry
+
+pkg/nidhogg (public API)
+  -> client, server, transport, profile, shaper
 ```
 
 ## Protocol
@@ -90,6 +98,25 @@ Report format:
 ```
 
 The server responds with the current active profile, allowing clients to receive updated profiles through telemetry without opening a new tunnel.
+
+### UDP over TCP (UoT)
+
+UDP datagrams are tunneled through the same TCP stream with length-prefix framing.
+
+Destination format supports a network prefix:
+- `host:port\n` -- TCP (default, backward compatible)
+- `tcp:host:port\n` -- TCP (explicit)
+- `udp:host:port\n` -- UDP
+
+UDP datagram framing inside the tunnel stream:
+
+```
+[2B big-endian length][datagram payload]
+[2B big-endian length][datagram payload]
+...
+```
+
+UDP traffic is not shaped -- datagrams are framed directly. Maximum datagram size: 65535 bytes.
 
 ## Traffic shaping
 

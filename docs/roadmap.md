@@ -4,16 +4,24 @@ Planned features and integrations for Nidhogg. Items are roughly ordered by prio
 
 ## Xray-core Integration
 
-- [ ] Implement Nidhogg as an Xray-core transport plugin
-- [ ] Register custom transport type in Xray-core registry
-- [ ] JSON config for Xray-core transport options (server, PSK, shaping mode)
+- [x] Implement Nidhogg as an Xray-core protocol (inbound + outbound)
+- [x] Register protocol in Xray-core registry with protobuf config
+- [x] JSON config for Xray-core protocol options (server, PSK, shaping mode)
+- [x] Public Go API in `pkg/nidhogg/` for external consumers
 - [ ] Compatibility with v2rayN, v2rayNG, Nekoray
+
+## UDP over TCP (UoT)
+
+- [x] Datagram framing with 2-byte length prefix (`internal/udprelay`)
+- [x] Server-side network prefix parsing (`udp:`/`tcp:`)
+- [x] SOCKS5 UDP ASSOCIATE support via `PacketFrameConn`
+- [x] Xray-core UDP dispatch integration
 
 ## sing-box Integration
 
-- [ ] Fork [sing-box](https://github.com/SagerNet/sing-box), register `"type": "nidhogg"` outbound
+- [ ] Fork [sing-box](https://github.com/SagerNet/sing-box), register `"type": "nidhogg"` outbound using `pkg/nidhogg` API
 - [ ] Implement `adapter.Outbound` interface: `DialContext`, `Start`, `Close`
-- [ ] JSON config options: `server`, `server_port`, `psk`, `shaping_mode`, `probe_interval`, `pcap_targets`, `switch_threshold`
+- [ ] JSON config options: `server`, `server_port`, `psk`, `shaping_mode`
 - [ ] Build tag: `//go:build with_nidhogg`
 - [ ] Split tunneling: domestic traffic direct, everything else through Nidhogg
 - [ ] Compatibility with Hiddify and NekoBox (sing-box core clients)

@@ -1,8 +1,8 @@
 # Nidhogg
 
-Adaptive anti-censorship transport with traffic shaping over HTTP/2.
+Adaptive anti-censorship protocol with traffic shaping over HTTP/2.
 
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 ## What is Nidhogg?
@@ -16,7 +16,9 @@ Nidhogg tunnels network traffic through an HTTPS reverse proxy using HTTP/2 POST
 - uTLS fingerprint randomization (Chrome, Firefox, Safari, or random)
 - PSK-authenticated handshake (HMAC-SHA256)
 - Automatic profile rotation on connection degradation
+- UDP over TCP (UoT) -- tunnel UDP datagrams (QUIC, DNS) through the TCP tunnel
 - Per-connection health monitoring with server telemetry feedback
+- Public Go API (`pkg/nidhogg`) for embedding in proxy frameworks (Xray-core, sing-box)
 - Server appears as a normal HTTPS reverse proxy to external observers
 
 ## How it works
@@ -28,7 +30,7 @@ sequenceDiagram
     participant Server as nidhogg-server<br/>(HTTPS reverse proxy)
     participant Target as Destination
 
-    App->>Client: SOCKS5 CONNECT host:port
+    App->>Client: SOCKS5 CONNECT / UDP ASSOCIATE host:port
     Client->>Server: HTTP/2 POST [PSK handshake + dest]
     Server-->>Client: 200 OK + traffic profile (JSON)
 
@@ -51,7 +53,7 @@ sequenceDiagram
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.26+
 - A server with a public IP and domain (for production)
 
 ### Build
@@ -161,13 +163,18 @@ Nidhogg is organized into focused internal packages:
 | `health` | Per-connection monitoring, degradation detection, aggregate tracking |
 | `telemetry` | Client-to-server health reporting, server-side aggregation |
 | `switcher` | Profile cache with atomic switching and callbacks |
+| `udprelay` | UDP datagram framing for UoT |
 | `logging` | Structured logging setup (`log/slog`) |
 
 See [docs/architecture.md](docs/architecture.md) for protocol details and design decisions.
 
+## Integration
+
+Nidhogg is integrated as a full protocol (`"protocol": "nidhogg"`) in a [forked Xray-core](https://github.com/aesleif/Xray-core), supporting both inbound (server) and outbound (client) handlers. The public Go API in `pkg/nidhogg/` provides `Client` and `Server` types for embedding into other proxy frameworks.
+
 ## Roadmap
 
-See [docs/roadmap.md](docs/roadmap.md) for planned features: Xray-core and sing-box integration, security hardening, connection pooling, local bypass, and release plans.
+See [docs/roadmap.md](docs/roadmap.md) for planned features: sing-box integration, security hardening, connection pooling, local bypass, and release plans.
 
 ## Security
 

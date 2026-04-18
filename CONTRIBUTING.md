@@ -11,7 +11,7 @@ go test ./...
 
 ## Development setup
 
-- **Go 1.22+** required
+- **Go 1.26+** required
 - No CGo dependencies
 - All code must pass `go vet ./...` and `gofmt`
 
@@ -19,7 +19,7 @@ go test ./...
 
 - Format with `gofmt` (no exceptions)
 - Use `log/slog` for all logging (structured, leveled)
-- Keep packages in `internal/` &mdash; no exported API guarantees
+- Keep internal packages in `internal/`. Public API is in `pkg/nidhogg/` &mdash; maintain backward compatibility there
 - Prefer short, focused functions over large ones
 - No comments explaining *what* the code does &mdash; only *why* when non-obvious
 
