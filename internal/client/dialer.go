@@ -85,7 +85,12 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 			headerWritten <- fmt.Errorf("write handshake: %w", err)
 			return
 		}
-		if _, err := pw.Write([]byte(dest + "\n")); err != nil {
+		d, err := transport.ParseDestination(dest)
+		if err != nil {
+			headerWritten <- fmt.Errorf("parse destination: %w", err)
+			return
+		}
+		if err := transport.WriteDest(pw, d); err != nil {
 			headerWritten <- fmt.Errorf("write destination: %w", err)
 			return
 		}

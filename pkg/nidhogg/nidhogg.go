@@ -5,11 +5,13 @@ package nidhogg
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"time"
 
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/shaper"
+	"github.com/aesleif/nidhogg/internal/transport"
 )
 
 // ShapingMode controls how aggressively traffic is shaped.
@@ -59,6 +61,24 @@ type TunnelConn interface {
 	// HandshakeRTT returns the time taken for the PSK handshake.
 	HandshakeRTT() time.Duration
 }
+
+// Command identifies the type of tunnel request.
+type Command = transport.Command
+
+const (
+	CommandTCP       = transport.CommandTCP
+	CommandUDP       = transport.CommandUDP
+	CommandTelemetry = transport.CommandTelemetry
+)
+
+// Destination represents a parsed tunnel destination.
+type Destination = transport.Destination
+
+// WriteDest encodes a Destination in binary format.
+func WriteDest(w io.Writer, d Destination) error { return transport.WriteDest(w, d) }
+
+// ReadDest reads a binary-encoded Destination from r.
+func ReadDest(r io.Reader) (Destination, error) { return transport.ReadDest(r) }
 
 // toInternalMode converts the public ShapingMode to the internal shaper.ShapingMode.
 func toInternalMode(m ShapingMode) shaper.ShapingMode {

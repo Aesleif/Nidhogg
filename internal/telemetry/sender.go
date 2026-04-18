@@ -89,7 +89,7 @@ func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, err
 		if _, err := pw.Write(marker); err != nil {
 			return
 		}
-		if _, err := pw.Write([]byte("_telemetry\n")); err != nil {
+		if err := transport.WriteDest(pw, transport.Destination{Command: transport.CommandTelemetry}); err != nil {
 			return
 		}
 		json.NewEncoder(pw).Encode(report)

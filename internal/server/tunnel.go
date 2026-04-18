@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -46,29 +45,22 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 			return
 		}
 
-		// PSK matched — read destination address (host:port\n)
+		// PSK matched — read binary destination header
 		reader := bufio.NewReader(r.Body)
-		dest, err := reader.ReadString('\n')
+		d, err := transport.ReadDest(reader)
 		if err != nil {
 			slog.Warn("tunnel: failed to read destination", "err", err)
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-		dest = strings.TrimSpace(dest)
 
-		if dest == "_telemetry" {
+		if d.Command == transport.CommandTelemetry {
 			handleTelemetry(w, reader, pm, agg)
 			return
 		}
 
-		// Parse network prefix: "udp:host:port", "tcp:host:port", or "host:port" (default tcp)
-		network := "tcp"
-		if strings.HasPrefix(dest, "udp:") {
-			network = "udp"
-			dest = dest[4:]
-		} else if strings.HasPrefix(dest, "tcp:") {
-			dest = dest[4:]
-		}
+		dest := d.Addr()
+		network := d.Network()
 
 		// Connect to upstream target
 		tcpUpstream, err := net.Dial(network, dest)
