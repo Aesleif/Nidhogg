@@ -2,12 +2,14 @@ package nidhogg
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/aesleif/nidhogg/internal/server"
 	"github.com/aesleif/nidhogg/internal/telemetry"
+	"github.com/aesleif/nidhogg/internal/transport"
 )
 
 // ServerConfig configures a nidhogg tunnel server.
@@ -29,12 +31,55 @@ type ServerConfig struct {
 	TelemetryCriticalThreshold int
 }
 
+// TelemetryReport is a health report sent by a nidhogg client.
+type TelemetryReport struct {
+	Profile    string `json:"profile"`
+	Status     string `json:"status"`
+	AvgRTTMs   int64  `json:"avg_rtt_ms"`
+	ErrorCount int    `json:"error_count"`
+}
+
 // Server handles incoming nidhogg tunnel connections.
 type Server struct {
-	psk     []byte
-	pm      *server.ProfileManager
-	agg     *telemetry.Aggregator
-	handler http.Handler
+	psk       []byte
+	validator *transport.HandshakeValidator
+	pm        *server.ProfileManager
+	agg       *telemetry.Aggregator
+	handler   http.Handler
+}
+
+// NewServerEmbedded creates a server for embedded use (e.g. inside Xray-core)
+// where routing is handled externally. No reverse proxy fallback is created.
+func NewServerEmbedded(cfg ServerConfig) (*Server, error) {
+	if cfg.PSK == "" {
+		return nil, fmt.Errorf("nidhogg: PSK is required")
+	}
+	if cfg.TunnelPath == "" {
+		cfg.TunnelPath = "/"
+	}
+	if len(cfg.ProfileTargets) == 0 {
+		cfg.ProfileTargets = []string{"google.com"}
+	}
+	if cfg.ProfileInterval == 0 {
+		cfg.ProfileInterval = 6 * time.Hour
+	}
+	if cfg.ProfileMinSnapshots <= 0 {
+		cfg.ProfileMinSnapshots = 20
+	}
+	if cfg.TelemetryCriticalThreshold <= 0 {
+		cfg.TelemetryCriticalThreshold = 3
+	}
+
+	psk := []byte(cfg.PSK)
+	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileInterval, cfg.ProfileMinSnapshots)
+	agg := telemetry.NewAggregator(pm, cfg.TelemetryCriticalThreshold)
+
+	return &Server{
+		psk:       psk,
+		validator: transport.NewValidator(psk),
+		pm:        pm,
+		agg:       agg,
+	}, nil
 }
 
 // NewServer creates a tunnel server with the given configuration.
@@ -74,10 +119,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	handler := server.TunnelHandler(psk, proxy, pm, agg)
 
 	return &Server{
-		psk:     psk,
-		pm:      pm,
-		agg:     agg,
-		handler: handler,
+		psk:       psk,
+		validator: transport.NewValidator(psk),
+		pm:        pm,
+		agg:       agg,
+		handler:   handler,
 	}, nil
 }
 
@@ -91,6 +137,43 @@ func (s *Server) Handler() http.Handler {
 // generation. It blocks until ctx is cancelled.
 func (s *Server) StartProfileManager(ctx context.Context) {
 	s.pm.Start(ctx)
+}
+
+// ValidateHandshake validates a PSK handshake from a client.
+// Returns true if the handshake is valid.
+func (s *Server) ValidateHandshake(data []byte) (bool, error) {
+	return s.validator.Validate(data)
+}
+
+// HandshakeSize returns the expected PSK handshake size in bytes.
+func HandshakeSize() int {
+	return transport.HandshakeSize
+}
+
+// CurrentProfileJSON returns the current traffic profile as JSON bytes.
+// Returns nil if no profile is available.
+func (s *Server) CurrentProfileJSON() []byte {
+	prof := s.pm.Current()
+	if prof == nil {
+		return nil
+	}
+	data, err := json.Marshal(prof)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// RecordTelemetry records a health report from a client.
+func (s *Server) RecordTelemetry(report TelemetryReport) {
+	if s.agg != nil {
+		s.agg.Record(telemetry.Report{
+			Profile:    report.Profile,
+			Status:     report.Status,
+			AvgRTTMs:   report.AvgRTTMs,
+			ErrorCount: report.ErrorCount,
+		})
+	}
 }
 
 // Close releases resources held by the server.
