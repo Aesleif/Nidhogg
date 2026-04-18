@@ -17,6 +17,7 @@ import (
 	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/telemetry"
 	"github.com/aesleif/nidhogg/internal/transport"
+	"github.com/aesleif/nidhogg/internal/udprelay"
 )
 
 const minSamplesForSnapshot = 10
@@ -60,8 +61,17 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 			return
 		}
 
+		// Parse network prefix: "udp:host:port", "tcp:host:port", or "host:port" (default tcp)
+		network := "tcp"
+		if strings.HasPrefix(dest, "udp:") {
+			network = "udp"
+			dest = dest[4:]
+		} else if strings.HasPrefix(dest, "tcp:") {
+			dest = dest[4:]
+		}
+
 		// Connect to upstream target
-		tcpUpstream, err := net.Dial("tcp", dest)
+		tcpUpstream, err := net.Dial(network, dest)
 		if err != nil {
 			slog.Warn("tunnel: failed to dial upstream", "dest", dest, "err", err)
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
@@ -116,6 +126,13 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 			w.Write([]byte{0, 0, 0, 0})
 		}
 		flusher.Flush()
+
+		// UDP relay: frame datagrams without shaping
+		if network == "udp" {
+			tc := &serverTunnelConn{reader: reader, writer: w, flusher: flusher}
+			udprelay.RelayUDP(r.Context(), upstream, tc)
+			return
+		}
 
 		// If we have a profile, wrap the relay in ShapedConn (both directions).
 		// Server uses Stream mode — padding only, no artificial delays.

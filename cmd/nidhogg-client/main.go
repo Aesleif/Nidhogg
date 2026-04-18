@@ -20,6 +20,7 @@ import (
 	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/switcher"
 	"github.com/aesleif/nidhogg/internal/telemetry"
+	"github.com/aesleif/nidhogg/internal/udprelay"
 )
 
 func main() {
@@ -64,8 +65,12 @@ func main() {
 	srv := socks5.NewServer(
 		socks5.WithLogger(socks5.NewLogger(log.New(os.Stderr, "socks5: ", log.LstdFlags))),
 		socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-			slog.Debug("SOCKS5 CONNECT", "addr", addr)
-			conn, prof, rtt, err := dialer.DialTunnel(ctx, addr)
+			dest := addr
+			if network == "udp" {
+				dest = "udp:" + addr
+			}
+			slog.Debug("SOCKS5 dial", "network", network, "addr", addr)
+			conn, prof, rtt, err := dialer.DialTunnel(ctx, dest)
 			if err != nil {
 				slog.Error("tunnel dial failed", "addr", addr, "err", err)
 				return nil, err
@@ -98,6 +103,9 @@ func main() {
 			tracker.TrackConn(monitored)
 			monitored.OnClose = func() {
 				tracker.UntrackConn(monitored)
+			}
+			if network == "udp" {
+				return udprelay.NewPacketFrameConn(monitored), nil
 			}
 			return monitored, nil
 		}),
