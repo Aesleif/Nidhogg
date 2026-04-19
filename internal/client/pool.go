@@ -52,9 +52,15 @@ func (p *ConnPool) GetClientConn(req *http.Request, addr string) (*http2.ClientC
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Drop dead/saturated connections.
-	alive := p.conns[addr][:0]
-	for _, cc := range p.conns[addr] {
+	// Drop dead/saturated connections. Allocate a fresh slice rather
+	// than reslicing in place — `p.conns[addr][:0]` would keep the dead
+	// pointers in the underlying array's tail past len, preventing the
+	// GC from reclaiming the ClientConn structs (each holds the TLS
+	// conn, frame buffers, stream map, HPACK state — easily hundreds of
+	// KB live).
+	prev := p.conns[addr]
+	alive := make([]*http2.ClientConn, 0, p.size)
+	for _, cc := range prev {
 		if cc.CanTakeNewRequest() {
 			alive = append(alive, cc)
 		}
@@ -117,7 +123,10 @@ func (p *ConnPool) MarkDead(cc *http2.ClientConn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for addr, list := range p.conns {
-		kept := list[:0]
+		// Fresh slice — see the rationale above GetClientConn for why
+		// `list[:0]` would leak ClientConn memory through the array's
+		// tail.
+		kept := make([]*http2.ClientConn, 0, len(list))
 		for _, c := range list {
 			if c != cc {
 				kept = append(kept, c)

@@ -128,6 +128,17 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 			return
 		}
 
+		// closeUpstream fully tears down the upstream TCP socket so that
+		// whichever relay goroutine is blocked on a Read from it gets
+		// unstuck and exits. Without this, an idle-but-alive upstream
+		// (websocket, MTProto long-poll) leaves the response goroutine
+		// hung forever after the client disconnects, wedging wg.Wait()
+		// and leaking the TCP socket + frame buffers.
+		var closeOnce sync.Once
+		closeUpstream := func() {
+			closeOnce.Do(func() { tcpUpstream.Close() })
+		}
+
 		// If we have a profile AND the client signaled it will frame, wrap
 		// the relay in ShapedConn (both directions). Server uses Stream mode
 		// — padding only, no artificial delays.
@@ -140,14 +151,13 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 
 			go func() {
 				defer wg.Done()
+				defer closeUpstream()
 				io.Copy(upstream, shaped)
-				if tcpConn, ok := tcpUpstream.(*net.TCPConn); ok {
-					tcpConn.CloseWrite()
-				}
 			}()
 
 			go func() {
 				defer wg.Done()
+				defer closeUpstream()
 				io.Copy(shaped, upstream)
 			}()
 
@@ -159,14 +169,13 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 
 			go func() {
 				defer wg.Done()
+				defer closeUpstream()
 				io.Copy(upstream, reader)
-				if tc, ok := tcpUpstream.(*net.TCPConn); ok {
-					tc.CloseWrite()
-				}
 			}()
 
 			go func() {
 				defer wg.Done()
+				defer closeUpstream()
 				buf := make([]byte, 32*1024)
 				for {
 					n, readErr := upstream.Read(buf)

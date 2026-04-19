@@ -6,6 +6,8 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,6 +36,17 @@ func main() {
 
 	level, _ := logging.ParseLevel(cfg.LogLevel) // already validated
 	logging.Setup(level)
+
+	// pprof on loopback for production heap/goroutine profiling.
+	// Bound to 127.0.0.1 so no auth needed; ssh-tunnel from the operator
+	// box to access (`ssh -L 6061:localhost:6061 client-host`).
+	go func() {
+		const addr = "127.0.0.1:6061"
+		slog.Info("starting pprof", "addr", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			slog.Error("pprof server error", "err", err)
+		}
+	}()
 
 	shapingMode, _ := shaper.ParseMode(cfg.ShapingMode) // already validated in LoadConfig
 	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint, shapingMode, cfg.ConnectionPoolSize)

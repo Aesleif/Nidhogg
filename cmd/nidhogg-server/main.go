@@ -15,6 +15,8 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/http2"
 
+	_ "net/http/pprof"
+
 	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/server"
 	"github.com/aesleif/nidhogg/internal/telemetry"
@@ -106,6 +108,17 @@ func main() {
 			}
 		}()
 	}
+
+	// pprof on loopback for production heap/goroutine profiling.
+	// Bound to 127.0.0.1 so no auth needed; ssh-tunnel from the operator
+	// box to access (`ssh -L 6060:localhost:6060 server`).
+	go func() {
+		const addr = "127.0.0.1:6060"
+		slog.Info("starting pprof", "addr", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			slog.Error("pprof server error", "err", err)
+		}
+	}()
 
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -139,6 +139,69 @@ func TestTunnelEchoShaped(t *testing.T) {
 	}
 }
 
+// TestTunnelClosesUpstreamWhenClientDisconnects covers a goroutine leak:
+// when the client closes its side of the tunnel but the upstream is alive
+// and silent (e.g. websocket / MTProto idle), the response-direction
+// goroutine used to block on upstream.Read forever — wedging wg.Wait,
+// preventing defer tcpUpstream.Close, and leaking the TCP socket plus
+// frame buffers per dead client. The fix closes the upstream as soon as
+// either relay direction exits.
+func TestTunnelClosesUpstreamWhenClientDisconnects(t *testing.T) {
+	psk := []byte("leak-psk")
+
+	// Silent upstream: accept, read into the void, but never write.
+	// We signal `closed` from inside Accept's goroutine so the test can
+	// wait for the server to drop us.
+	silentLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silentLn.Close()
+
+	closed := make(chan struct{})
+	go func() {
+		conn, err := silentLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4096)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				close(closed)
+				return
+			}
+		}
+	}()
+
+	srv := startTunnelServer(t, psk)
+	dialer := newTestDialer(t, srv, psk)
+
+	conn, _, _, err := dialer.DialTunnel(context.Background(), silentLn.Addr().String())
+	if err != nil {
+		t.Fatalf("DialTunnel: %v", err)
+	}
+
+	// Send a byte so the upstream goroutine is definitely sitting in Read.
+	if _, err := conn.Write([]byte{0x42}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Close the client side. With the fix, server's first relay direction
+	// exits (r.Body returns io.EOF), runs deferred closeUpstream, the
+	// silent upstream sees io.EOF on its Read, and signals `closed`.
+	// Without the fix, the server's response-direction goroutine sits
+	// on upstream.Read indefinitely → upstream stays open → no signal.
+	conn.Close()
+
+	select {
+	case <-closed:
+		// pass
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream connection was never closed by server — relay goroutine leaked")
+	}
+}
+
 // TestTunnelEchoShapedSecondCall covers the regression where the dialer
 // dropped the parsed profile on the second call (server skipped JSON via
 // version cache → prof returned nil → client unwrapped ShapedConn while

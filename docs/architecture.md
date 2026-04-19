@@ -222,6 +222,43 @@ The client also sets `MaxReadFrameSize=1MiB` on its `http2.Transport`. The
 default client receive windows (1 GiB connection / 4 MiB per stream) are
 already generous and not exposed for tuning by upstream `x/net/http2`.
 
+## Profiling
+
+Both the standalone server and the standalone client expose `net/http/pprof`
+on a loopback-only listener (`127.0.0.1:6060` for the server,
+`127.0.0.1:6061` for the client). No auth is configured — bind on loopback
+is the security boundary. SSH-tunnel from the operator box:
+
+```bash
+ssh -L 6060:localhost:6060 server-host    # for the standalone server
+ssh -L 6061:localhost:6061 client-host    # for the standalone client
+
+curl -o heap.pprof      http://127.0.0.1:6060/debug/pprof/heap
+curl -o goroutine.pprof http://127.0.0.1:6060/debug/pprof/goroutine
+go tool pprof -top heap.pprof | head -20
+go tool pprof -top goroutine.pprof | head -20
+```
+
+When nidhogg runs as an Xray outbound (`pkg/nidhogg` embedded in Xray-core),
+the standalone client binary is not used. Enable pprof through Xray's own
+`metrics` module instead — add to the Xray config:
+
+```json
+{
+  "metrics": {
+    "tag": "metrics_out",
+    "listen": "127.0.0.1:6060"
+  },
+  "outbounds": [
+    { "tag": "metrics_out", "protocol": "freedom" }
+  ]
+}
+```
+
+This serves `/debug/pprof/*` on `127.0.0.1:6060` inside the Xray process.
+The pprof handlers are registered by `app/metrics/metrics.go` in the Xray
+fork via the `_ "net/http/pprof"` import.
+
 ## Memory bounds
 
 The server is meant to run for weeks under sustained load. Two structures
