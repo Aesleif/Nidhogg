@@ -31,6 +31,19 @@ go test ./...
 4. Ensure `go build ./...` and `go test ./...` pass
 5. Keep commits atomic and well-described
 
+## Testing patterns
+
+- **HTTP/2 in unit tests** &mdash; use `golang.org/x/net/http2/h2c` to spin up
+  cleartext h2 servers via `httptest`. See `internal/client/pool_test.go`
+  and `internal/server/tunnel_test.go` for the pattern.
+- **Regression tests for known bugs** &mdash; name them after the failure
+  scenario and include a comment explaining what broke before the fix.
+  Examples: `TestTunnelEchoServerProfileClientNoShape`,
+  `TestTunnelEchoUDPWithShaping`, `TestRecordingConnCapsSamples`.
+- **Running a subset** &mdash; `go test ./internal/client/... -run TestPool -v`
+- **Race detector** &mdash; for any change touching `internal/client/pool.go`,
+  `internal/transport/handshake.go`, or shaper buffers, run with `-race`.
+
 ## Issues
 
 ### Bug reports

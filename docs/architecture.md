@@ -128,12 +128,9 @@ The server responds with the current active profile, allowing clients to receive
 
 ### UDP over TCP (UoT)
 
-UDP datagrams are tunneled through the same TCP stream with length-prefix framing.
-
-Destination format supports a network prefix:
-- `host:port\n` -- TCP (default, backward compatible)
-- `tcp:host:port\n` -- TCP (explicit)
-- `udp:host:port\n` -- UDP
+UDP datagrams are tunneled through the same TCP stream with length-prefix
+framing. The transport command in the binary destination header
+(`command = 0x02`) tells the server to dial UDP instead of TCP.
 
 UDP datagram framing inside the tunnel stream:
 
@@ -143,7 +140,14 @@ UDP datagram framing inside the tunnel stream:
 ...
 ```
 
-UDP traffic is not shaped -- datagrams are framed directly. Maximum datagram size: 65535 bytes.
+UDP traffic is **not shaped** — the byte-stream shaper would collide with
+the datagram framing layer and corrupt every packet. Both the client
+dialer (`internal/client/dialer.go`) and the standalone server
+(`internal/server/tunnel.go`) bypass `ShapedConn` whenever the destination
+command is `CommandUDP`. Xray's inbound (`Xray-core/proxy/nidhogg/server.go`)
+also skips shaping for UDP.
+
+Maximum datagram size: 65535 bytes.
 
 ## Traffic shaping
 
@@ -175,6 +179,66 @@ Profiles are generated from real HTTPS traffic:
 2. `profile.Generate()` builds CDF distributions for send/receive sizes and inter-packet timing
 3. `shaper.NewShapedConn()` samples from these CDFs to determine frame sizes
 
+## Client connection pool
+
+`internal/client/pool.go` implements `http2.ClientConnPool` to keep multiple
+TCP+TLS connections to the same server and round-robin streams across them.
+Default pool size is 4 (configurable via `connection_pool_size`). Pool of 1
+falls back to the standard single-connection h2 transport.
+
+Why: HTTP/2 multiplexes thousands of streams on one TCP socket, but TCP
+head-of-line blocking means a single packet loss stalls every stream on
+that connection. Spreading streams across N parallel sockets gives each its
+own congestion window and reduces this effect — same trick browsers used to
+open 6 connections per origin under HTTP/1.1.
+
+Behavior:
+- Lazy init: connections are dialed on first `GetClientConn` and as needed
+  up to `size`.
+- Round-robin: each call increments an `atomic.Uint64` and picks
+  `conns[counter % len(alive)]`.
+- Live filtering via `ClientConn.CanTakeNewRequest()` — saturated/dead
+  connections are skipped.
+- `MarkDead` removes a connection; the next call redials to refill.
+- TLS dial reuses `transport.DialTLS` so the uTLS fingerprint is preserved
+  on every pooled connection.
+
+## HTTP/2 server tuning
+
+Both standalone (`cmd/nidhogg-server/main.go` via `http2.ConfigureServer`)
+and the Xray inbound (`Xray-core/proxy/nidhogg/server.go`) configure the
+`http2.Server`:
+
+| Field | Value | Why |
+|-------|-------|-----|
+| `MaxConcurrentStreams` | 1000 | Default 250 throttles burst tproxy load |
+| `MaxUploadBufferPerStream` | 8 MiB | Default 1 MiB causes WINDOW_UPDATE round-trips on bulk uploads |
+| `MaxUploadBufferPerConnection` | 64 MiB | Headroom for many parallel streams |
+| `MaxReadFrameSize` | 1 MiB | Default 16 KiB means many tiny DATA frames; 1 MiB amortizes per-frame overhead |
+| `ReadIdleTimeout` | 30 s | Send PING after 30s of silence |
+| `PingTimeout` | 15 s | Drop connection if PING is unanswered — kills hung relay goroutines on dead clients |
+
+The client also sets `MaxReadFrameSize=1MiB` on its `http2.Transport`. The
+default client receive windows (1 GiB connection / 4 MiB per stream) are
+already generous and not exposed for tuning by upstream `x/net/http2`.
+
+## Memory bounds
+
+The server is meant to run for weeks under sustained load. Two structures
+that previously grew without bound now have explicit caps:
+
+- **`internal/pcap/recorder.go`** — `RecordingConn.samples` is capped at
+  10,000 entries (`maxSamples`). Beyond the cap, Read/Write skip the append.
+  10K samples is far more than profile generation needs (CDFs are stable
+  with hundreds), and the cap protects against multi-hour tunnels to
+  profile-target hosts piling up `PacketSample` structs.
+- **`internal/transport/handshake.go`** — `HandshakeValidator.nonces` is
+  hard-capped at `nonceRingSize` (10,000). When the time-based sweep
+  (`< now - 2*maxClockSkew`) cannot shrink the map (because every entry is
+  fresh under sustained load), arbitrary entries are dropped down to the
+  cap. Trade-off: a brief replay window for the evicted entries; see
+  [SECURITY.md](../SECURITY.md) for the analysis.
+
 ## Health monitoring
 
 ### Per-connection monitoring
@@ -205,3 +269,9 @@ MonitoredConn.checkLevel()       detects level change
 ```
 
 Existing connections continue with their original profile (graceful drain).
+
+The dialer also keeps a `cachedProfile` (`atomic.Pointer[profile.Profile]`)
+so subsequent `DialTunnel` calls can wrap streams in `ShapedConn` even when
+the server skipped the JSON payload via the version-cache optimization.
+Without this cache the second call would receive `prof = nil`, fall through
+to a raw connection, and mismatch the still-shaping server side.

@@ -1,60 +1,139 @@
 # Roadmap
 
-Planned features and integrations for Nidhogg. Items are roughly ordered by priority.
+What's done, what's next, and what might come later. Items in **Next up**
+are roughly ordered by priority.
 
-## Xray-core Integration
+## Done
 
-- [x] Implement Nidhogg as an Xray-core protocol (inbound + outbound)
-- [x] Register protocol in Xray-core registry with protobuf config
-- [x] JSON config for Xray-core protocol options (server, PSK, shaping mode)
-- [x] Public Go API in `pkg/nidhogg/` for external consumers
-- [ ] Compatibility with v2rayN, v2rayNG, Nekoray
+### Protocol and integrations
+- Xray-core integration: full protocol (inbound + outbound), protobuf
+  config, JSON config, UDP dispatch
+- Public Go API in `pkg/nidhogg/` for embedding
+- UDP over TCP: 2-byte length-prefix framing, SOCKS5 UDP ASSOCIATE
+  support via `PacketFrameConn`
+- Binary destination encoding (TLV with command/addr_type/address/port)
+- Profile delivery with CRC32 versioning to skip retransmission
+- Telemetry channel reusing the same endpoint with a special command byte
 
-## UDP over TCP (UoT)
+### Performance
+- HTTP/2 server tuning: `MaxConcurrentStreams=1000`, upload buffers
+  8 MiB / 64 MiB, `MaxReadFrameSize=1 MiB`
+- HTTP/2 keepalive: `ReadIdleTimeout=30s` + `PingTimeout=15s` to drop
+  half-dead connections
+- Client connection pool: round-robin streams across N parallel TCP+TLS
+  connections (default 4) to mitigate TCP head-of-line blocking
+- Client `MaxReadFrameSize=1 MiB` to amortize per-frame overhead
 
-- [x] Datagram framing with 2-byte length prefix (`internal/udprelay`)
-- [x] Server-side network prefix parsing (`udp:`/`tcp:`)
-- [x] SOCKS5 UDP ASSOCIATE support via `PacketFrameConn`
-- [x] Xray-core UDP dispatch integration
+### Security and reliability
+- Nonce replay protection with timestamp window (±60s) and ring map
+- Hard-cap on `nonces` map (prevents unbounded growth under load)
+- Bounded `RecordingConn.samples` (10K cap, prevents per-connection leaks)
+- Shaping mode negotiation byte (client tells server whether to frame the
+  relay; mismatched framing previously corrupted every byte)
+- Profile cache in client dialer (preserves shaping when server skips
+  JSON via version cache)
 
-## sing-box Integration
+### Production
+- Replaced VLESS-Reality on the author's personal anti-censorship gateway
+  in April 2026
+- Running as systemd-managed service with Let's Encrypt autocert
 
-- [ ] Fork [sing-box](https://github.com/SagerNet/sing-box), register `"type": "nidhogg"` outbound using `pkg/nidhogg` API
-- [ ] Implement `adapter.Outbound` interface: `DialContext`, `Start`, `Close`
-- [ ] JSON config options: `server`, `server_port`, `psk`, `shaping_mode`
-- [ ] Build tag: `//go:build with_nidhogg`
-- [ ] Split tunneling: domestic traffic direct, everything else through Nidhogg
-- [ ] Compatibility with Hiddify and NekoBox (sing-box core clients)
-- [ ] Android support via sing-box mobile build system (libbox)
+## Next up
 
-## Security Hardening
+### Active probing hardening (highest priority)
 
-- [ ] Nonce replay protection with ring buffer (10,000 entries)
-- [ ] Timestamp validation window (accept handshakes within ±60 seconds)
-- [ ] PSK rotation: server announces new PSK through profile delivery
-- [ ] Server-side rate limiting: max 10 new connections per second per IP
+Currently a determined active prober can fingerprint the server as "Go's
+`crypto/tls`, not nginx/cloudflare". VLESS-Reality solves this by SNI-muxing
+the TLS handshake to a real upstream site so ServerHello is byte-identical
+to the legitimate origin.
 
-## Resilience
+- [ ] Replace reverse-proxy fallback with **transparent SNI mux** to a
+  configured real upstream
+- [ ] On bad PSK: forward the entire TLS connection (not the decrypted
+  HTTP request) to the upstream so handshakes match the real site
+- [ ] Document the upstream-selection trade-offs (cover site availability,
+  latency, bandwidth amplification risk)
 
-- [ ] Auto-reconnect with exponential backoff on connection loss
-- [ ] Connection pooling: maintain 2-3 warm TLS connections for instant switchover
-- [ ] Graceful degradation: log and continue when server is temporarily unreachable
+### Multi-PSK / per-user authentication
 
-## Local Bypass
+Today all clients share one PSK. Compromise of one client invalidates all.
 
-Inspired by [zapret](https://github.com/bol-van/zapret):
+- [ ] Server config takes a list of `{user_id, psk}` pairs (or UUID-style
+  keys)
+- [ ] Handshake includes a user identifier so the server validates against
+  the right key
+- [ ] Hot-reload: add/revoke users without restarting the server
+- [ ] Per-user telemetry and rate limiting hooks
+
+### TLS server fingerprint masking
+
+Even with SNI mux, when nidhogg DOES terminate TLS (the tunnel handshake
+itself), JA3S currently identifies it as Go.
+
+- [ ] Configure `tls.Config` cipher suites and extension order to match a
+  popular web server profile (e.g. nginx, Caddy)
+- [ ] Or integrate a server-side uTLS-style library if one becomes
+  available
+- [ ] Validate against `ja3er.com` / similar before merging
+
+### Server-side rate limiting
+
+- [ ] Limit handshake attempts per source IP (e.g. 10/sec)
+- [ ] Defends against active-probe spam, brute-force PSK attempts
+- [ ] Should be configurable so legitimate NAT'd users aren't blocked
+
+### Wire-protocol specification + external review
+
+- [ ] Write `docs/spec.md` with byte-level protocol description
+- [ ] Document threat model and crypto choices in detail
+- [ ] Open the spec for community / paid security review
+- [ ] Action item before any wider deployment recommendation
+
+### Auto-reconnect and resilience
+
+- [ ] Client retries with exponential backoff when server unreachable
+- [ ] Fast failover between multiple configured server endpoints
+- [ ] Surface server-unreachable to the user (logs, exit code)
+
+### sing-box integration
+
+- [ ] Fork sing-box, register `"type": "nidhogg"` outbound using
+  `pkg/nidhogg`
+- [ ] Implement `adapter.Outbound`: `DialContext`, `Start`, `Close`
+- [ ] JSON config options matching the Xray fork
+- [ ] Build tag `//go:build with_nidhogg`
+- [ ] Compatibility with Hiddify, NekoBox (sing-box clients)
+- [ ] Android via libbox
+
+### Client compatibility
+
+- [ ] v2rayN / v2rayNG / Nekoray support
+- [ ] Sample configs for common client GUIs
+
+### Local bypass (zapret-style)
 
 - [ ] Optional `local_bypass` mode in client config
-- [ ] Attempt direct connection with ClientHello fragmentation before tunneling
-- [ ] If direct connection succeeds, use it (saves server bandwidth)
-- [ ] If direct connection fails, fall back to tunnel transparently
+- [ ] Try direct connection with ClientHello fragmentation first
+- [ ] Fall back to tunnel transparently if direct fails
+- [ ] Saves server bandwidth for traffic that's already unblocked
 
-## Release and CI
+### Release engineering
 
-- [ ] Goreleaser config for multi-platform builds:
-  - `linux/amd64`, `linux/arm64`
-  - `windows/amd64`
-  - `darwin/amd64`, `darwin/arm64`
-- [ ] Docker image for server deployment
-- [ ] GitHub Actions CI pipeline: lint, test, build
+- [ ] Goreleaser multi-platform builds (`linux/{amd64,arm64}`,
+  `windows/amd64`, `darwin/{amd64,arm64}`)
+- [ ] Docker image for the server
+- [ ] GitHub Actions CI (lint, test, build, race detector)
 - [ ] First tagged release: `v0.1.0`
+
+## Future ideas
+
+- **PSK rotation announcement** — server pushes new PSK in profile delivery
+  payload; old PSK valid for grace period
+- **HTTP/3 (QUIC) transport** — would solve TCP head-of-line blocking
+  cleanly, but UDP/443 is heavily blocked in Russia, so not a priority
+- **Hot-reload server config** without restart (profile targets, PSK list)
+- **Web UI** for server management (status, active connections, bandwidth)
+- **Multi-server failover** in the client (geo-distributed gateway pool)
+- **Pluggable transport** spec compliance (Tor's `pt_2.1`) — would let
+  Tor Browser use Nidhogg as a bridge
+- **Observability** — Prometheus metrics endpoint behind auth

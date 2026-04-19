@@ -11,14 +11,15 @@ Nidhogg tunnels network traffic through an HTTPS reverse proxy using HTTP/2 POST
 
 **Key features:**
 
-- HTTP/2 POST streaming tunnel over TLS
+- HTTP/2 POST streaming tunnel over TLS with multi-connection client pool
 - Adaptive traffic shaping from real HTTPS profiles (CDF-based packet sizing and timing)
 - uTLS fingerprint randomization (Chrome, Firefox, Safari, or random)
-- PSK-authenticated handshake (HMAC-SHA256)
+- PSK-authenticated handshake (HMAC-SHA256 with replay-protected nonce)
 - Automatic profile rotation on connection degradation
 - UDP over TCP (UoT) -- tunnel UDP datagrams (QUIC, DNS) through the TCP tunnel
 - Per-connection health monitoring with server telemetry feedback
 - Public Go API (`pkg/nidhogg`) for embedding in proxy frameworks (Xray-core, sing-box)
+- Bounded memory footprint -- safe for long-running production servers
 - Server appears as a normal HTTPS reverse proxy to external observers
 
 ## How it works
@@ -31,8 +32,8 @@ sequenceDiagram
     participant Target as Destination
 
     App->>Client: SOCKS5 CONNECT / UDP ASSOCIATE host:port
-    Client->>Server: HTTP/2 POST [PSK handshake + dest]
-    Server-->>Client: 200 OK + traffic profile (JSON)
+    Client->>Server: HTTP/2 POST [handshake + dest + version + shaping_mode]
+    Server-->>Client: 200 OK + [version + size + profile JSON]
 
     loop Shaped relay
         App->>Client: plaintext data
@@ -140,6 +141,7 @@ Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | `max_rtt_ms` | int | `2000` | Maximum handshake RTT before critical (ms) |
 | `consecutive_failures` | int | `3` | Write errors before marking connection critical |
 | `telemetry_interval` | string | `"30s"` | Health telemetry reporting interval |
+| `connection_pool_size` | int | `4` | Parallel TCP+TLS connections (1 = single conn) |
 
 ### Shaping modes
 
@@ -157,9 +159,11 @@ Nidhogg is organized into focused internal packages:
 | Package | Purpose |
 |---------|---------|
 | `transport` | TLS dialing with uTLS, PSK handshake generation/validation |
+| `client` | Dialer with HTTP/2 connection pool, profile cache |
+| `server` | Tunnel handler, reverse proxy fallback, profile manager |
 | `shaper` | Traffic shaping: frame encoding, CDF sampling, burst emulation |
 | `profile` | Profile definition, generation from traffic snapshots, LRU cache |
-| `pcap` | Traffic recording from real HTTPS connections |
+| `pcap` | Bounded traffic recording from real HTTPS connections |
 | `health` | Per-connection monitoring, degradation detection, aggregate tracking |
 | `telemetry` | Client-to-server health reporting, server-side aggregation |
 | `switcher` | Profile cache with atomic switching and callbacks |
@@ -170,11 +174,20 @@ See [docs/architecture.md](docs/architecture.md) for protocol details and design
 
 ## Integration
 
-Nidhogg is integrated as a full protocol (`"protocol": "nidhogg"`) in a [forked Xray-core](https://github.com/aesleif/Xray-core), supporting both inbound (server) and outbound (client) handlers. The public Go API in `pkg/nidhogg/` provides `Client` and `Server` types for embedding into other proxy frameworks.
+Nidhogg is integrated as a full protocol (`"protocol": "nidhogg"`) in a
+[forked Xray-core](https://github.com/aesleif/Xray-core), supporting both
+inbound (server) and outbound (client) handlers including UDP dispatch.
+The author's production deployment uses tproxy + Xray's HTTP/2 multiplexing
+through the nidhogg outbound.
+
+The public Go API in `pkg/nidhogg/` provides `Client` and `Server` types for
+embedding into other proxy frameworks. Server-side integrators implement the
+relay loop themselves and call `Server.ShapeRelay(...)` to wrap traffic in
+shaping when the active profile and the client's `shaping_mode` agree.
 
 ## Roadmap
 
-See [docs/roadmap.md](docs/roadmap.md) for planned features: sing-box integration, security hardening, connection pooling, local bypass, and release plans.
+See [docs/roadmap.md](docs/roadmap.md) for what's done, what's coming next (active probing hardening, multi-PSK auth, sing-box integration, release engineering), and longer-term ideas.
 
 ## Security
 
