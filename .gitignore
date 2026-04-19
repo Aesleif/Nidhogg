@@ -3,3 +3,4 @@
 bin/
 client-config.json
 server-config.json
+pprof
