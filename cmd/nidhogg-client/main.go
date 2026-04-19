@@ -36,7 +36,7 @@ func main() {
 	logging.Setup(level)
 
 	shapingMode, _ := shaper.ParseMode(cfg.ShapingMode) // already validated in LoadConfig
-	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint, shapingMode)
+	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint, shapingMode, cfg.ConnectionPoolSize)
 
 	healthCfg := health.Config{
 		MaxHandshakeRTT:     time.Duration(cfg.MaxRTTMs) * time.Millisecond,

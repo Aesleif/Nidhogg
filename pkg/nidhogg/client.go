@@ -22,6 +22,10 @@ type ClientConfig struct {
 	Fingerprint string
 	// ShapingMode controls traffic shaping applied to tunnel connections.
 	ShapingMode ShapingMode
+	// ConnectionPoolSize is the number of parallel TCP+TLS connections
+	// the HTTP/2 transport keeps to the server. Default: 4 (when zero).
+	// Set to 1 to use a single connection.
+	ConnectionPoolSize int
 }
 
 // Client creates tunnel connections to a nidhogg server.
@@ -43,6 +47,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Fingerprint == "" {
 		cfg.Fingerprint = "randomized"
 	}
+	if cfg.ConnectionPoolSize == 0 {
+		cfg.ConnectionPoolSize = 4
+	}
 
 	d := client.NewDialer(
 		cfg.Server,
@@ -51,6 +58,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		cfg.Insecure,
 		cfg.Fingerprint,
 		toInternalMode(cfg.ShapingMode),
+		cfg.ConnectionPoolSize,
 	)
 	return &Client{dialer: d}, nil
 }

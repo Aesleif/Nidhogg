@@ -82,7 +82,7 @@ func newTestDialer(t *testing.T, srv *httptest.Server, psk []byte) *client.Diale
 func newTestDialerWithShaping(t *testing.T, srv *httptest.Server, psk []byte, mode shaper.ShapingMode) *client.Dialer {
 	t.Helper()
 	host := srv.URL[len("https://"):]
-	return client.NewDialer(host, "/", psk, true, "standard", mode)
+	return client.NewDialer(host, "/", psk, true, "standard", mode, 1)
 }
 
 func makeTestProfile() *profile.Profile {

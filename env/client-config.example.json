@@ -8,5 +8,6 @@
   "shaping_mode": "balanced",
   "log_level": "info",
   "max_rtt_ms": 2000,
-  "consecutive_failures": 3
+  "consecutive_failures": 3,
+  "connection_pool_size": 4
 }

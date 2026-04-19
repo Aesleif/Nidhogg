@@ -37,22 +37,43 @@ type Dialer struct {
 // NewDialer creates a Dialer for the given server configuration.
 // fingerprint controls the TLS ClientHello: "randomized" (default), "chrome", "firefox", "safari".
 // shapingMode controls traffic shaping mode applied to established tunnels.
-func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode) *Dialer {
+// poolSize sets how many parallel TCP+TLS connections the HTTP/2 transport
+// keeps to the server (mitigates TCP head-of-line blocking). Values <=1
+// keep the default single-connection pool.
+func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int) *Dialer {
 	helloID, _ := transport.FingerprintID(fingerprint) // validated in config
 
+	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return transport.DialTLS(ctx, network, addr, insecure, helloID)
+	}
+
 	h2transport := &http2.Transport{
+		// 1MB DATA frames amortize per-frame overhead on bulk transfers.
+		MaxReadFrameSize: 1 << 20,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			return transport.DialTLS(ctx, network, addr, insecure, helloID)
+			return dialTLS(ctx, network, addr)
 		},
 	}
 
 	// Fallback for testing with standard TLS (e.g., httptest servers that don't support uTLS)
 	if helloID == (utls.ClientHelloID{}) {
+		stdDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return tls.Dial(network, addr, &tls.Config{
+				InsecureSkipVerify: insecure,
+				NextProtos:         []string{"h2"},
+			})
+		}
 		h2transport = &http2.Transport{
+			MaxReadFrameSize: 1 << 20,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: insecure,
 			},
 		}
+		dialTLS = stdDial
+	}
+
+	if poolSize > 1 {
+		h2transport.ConnPool = NewConnPool(h2transport, poolSize, dialTLS)
 	}
 
 	serverURL := "https://" + server + tunnelPath

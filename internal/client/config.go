@@ -23,6 +23,7 @@ type Config struct {
 	MaxRTTMs            int    `json:"max_rtt_ms"`           // max handshake RTT in ms, default 2000
 	ConsecutiveFailures int    `json:"consecutive_failures"` // write errors before unhealthy, default 3
 	TelemetryInterval   string `json:"telemetry_interval"`   // e.g. "30s", default "30s"
+	ConnectionPoolSize  int    `json:"connection_pool_size"` // parallel TCP+TLS connections, default 4
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -66,6 +67,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.TelemetryInterval == "" {
 		cfg.TelemetryInterval = "30s"
+	}
+	if cfg.ConnectionPoolSize <= 0 {
+		cfg.ConnectionPoolSize = 4
 	}
 
 	return &cfg, nil

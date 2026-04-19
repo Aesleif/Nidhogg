@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/net/http2"
 
 	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/server"
@@ -61,6 +62,18 @@ func main() {
 		Addr:      cfg.Listen,
 		Handler:   mux,
 		TLSConfig: tlsCfg,
+	}
+
+	// Tune HTTP/2 for proxy workload: many concurrent streams, big upload
+	// buffers (clients pump TLS records of upstream traffic through us),
+	// and bigger DATA frames to amortize per-frame overhead.
+	if err := http2.ConfigureServer(srv, &http2.Server{
+		MaxConcurrentStreams:         1000,
+		MaxUploadBufferPerStream:     8 << 20,
+		MaxUploadBufferPerConnection: 64 << 20,
+		MaxReadFrameSize:             1 << 20,
+	}); err != nil {
+		log.Fatalf("failed to configure HTTP/2: %v", err)
 	}
 
 	if cfg.CertFile != "" {
