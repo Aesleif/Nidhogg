@@ -63,6 +63,16 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 		}
 		clientVersion := binary.BigEndian.Uint32(clientVersionBuf[:])
 
+		// Read client's shaping mode so we only frame the relay when the
+		// client also frames. Mismatched framing corrupts the entire stream.
+		var shapingBuf [1]byte
+		if _, err := io.ReadFull(reader, shapingBuf[:]); err != nil {
+			slog.Warn("tunnel: failed to read shaping mode", "err", err)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		clientShaping := shaper.DecodeMode(shapingBuf[0]) != shaper.Disabled
+
 		if d.Command == transport.CommandTelemetry {
 			handleTelemetry(w, reader, pm, agg, clientVersion)
 			return
@@ -118,9 +128,10 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 			return
 		}
 
-		// If we have a profile, wrap the relay in ShapedConn (both directions).
-		// Server uses Stream mode — padding only, no artificial delays.
-		if activeProfile != nil {
+		// If we have a profile AND the client signaled it will frame, wrap
+		// the relay in ShapedConn (both directions). Server uses Stream mode
+		// — padding only, no artificial delays.
+		if activeProfile != nil && clientShaping {
 			tc := &serverTunnelConn{reader: reader, writer: w, flusher: flusher}
 			shaped := shaper.NewShapedConn(tc, activeProfile, shaper.Stream)
 

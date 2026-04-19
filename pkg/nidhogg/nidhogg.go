@@ -83,6 +83,25 @@ func ReadDest(r io.Reader) (Destination, error) { return transport.ReadDest(r) }
 // ProfileVersionHash computes a CRC32 version hash from serialized profile JSON.
 func ProfileVersionHash(data []byte) uint32 { return profile.VersionHash(data) }
 
+// DecodeShapingMode decodes the wire byte sent by the client (after
+// clientVersion in the request header) into a ShapingMode. Unknown
+// values fall back to ShapingDisabled.
+//
+// External integrators (e.g. Xray-core) that drive their own request
+// reader use this to learn whether the client will frame its traffic.
+func DecodeShapingMode(b byte) ShapingMode {
+	switch shaper.DecodeMode(b) {
+	case shaper.Stream:
+		return ShapingStream
+	case shaper.Balanced:
+		return ShapingBalanced
+	case shaper.Stealth:
+		return ShapingStealth
+	default:
+		return ShapingDisabled
+	}
+}
+
 // toInternalMode converts the public ShapingMode to the internal shaper.ShapingMode.
 func toInternalMode(m ShapingMode) shaper.ShapingMode {
 	switch m {

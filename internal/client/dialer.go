@@ -90,6 +90,11 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	binary.BigEndian.PutUint32(knownVersionBuf[:], d.profileVersion.Load())
 	header.Write(knownVersionBuf[:])
 
+	// Signal client's shaping mode so the server only wraps the relay
+	// in a ShapedConn when the client also will. Otherwise the framing
+	// would mismatch and corrupt all data.
+	header.WriteByte(shaper.EncodeMode(d.shapingMode))
+
 	pr, pw := io.Pipe()
 	body := io.MultiReader(&header, pr)
 

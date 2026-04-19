@@ -52,40 +52,67 @@ All tunnel and telemetry traffic flows through the same HTTP endpoint (default `
 Client -> Server:
   POST / HTTP/2
   Content-Type: application/octet-stream
-  Body: [handshake:57B] [destination\n] [payload...]
+  Body: [handshake:57B] [destination] [client_profile_version:4B] [shaping_mode:1B] [payload...]
 
-  Handshake = [timestamp:8B] [random:17B] [hmac-sha256:32B]
-  HMAC covers: timestamp + random, key = PSK
+  Handshake     = [version:1B = 0x01] [timestamp:8B BE millis] [nonce:16B] [hmac-sha256:32B]
+  HMAC covers   : version + timestamp + nonce, key = PSK
+  destination   : binary TLV — see "Destination encoding" below
+  shaping_mode  : 0=disabled, 1=stream, 2=balanced, 3=stealth
 ```
 
 Non-matching requests are forwarded to the reverse proxy target (cover traffic).
 
+`shaping_mode` lets the server know whether the client will frame its traffic
+via `ShapedConn`. The server only frames the relay (in both directions) when
+`shaping_mode != 0` AND it has an active profile — otherwise it relays raw
+bytes. Mismatched framing would corrupt the entire stream.
+
+### Destination encoding
+
+```
+[command:1B] [addr_type:1B] [address:variable] [port:2B BE]
+
+  command    : 0x01=TCP, 0x02=UDP, 0x03=Telemetry
+  addr_type  : 0x01=IPv4 (4B), 0x02=Domain (1B length + bytes), 0x03=IPv6 (16B)
+```
+
+For `command = 0x03 (Telemetry)` only the command byte is written; no
+address or port follows.
+
 ### Profile delivery
 
-After the server accepts a tunnel, it responds with the active traffic profile inline:
+After the server accepts a tunnel, it responds with the current traffic
+profile inline. The 4-byte version header lets the client skip re-parsing
+when it already cached the profile:
 
 ```
 Server -> Client:
   200 OK
   X-Nidhogg-Tunnel: 1
-  Body: [profile_size:4B BE] [profile_json] [relay data...]
+  Body: [profile_version:4B BE CRC32] [profile_size:4B BE] [profile_json?] [relay data...]
 ```
 
-If `profile_size == 0`, no profile is available and shaping is skipped.
+- `profile_version == 0` AND `profile_size == 0`: server has no active profile.
+- `profile_version != 0` AND `profile_size == 0`: client already has this version (matched `client_profile_version`).
+- `profile_version != 0` AND `profile_size > 0`: full JSON payload follows.
 
 ### Telemetry
 
-Telemetry uses the same endpoint with a special destination marker:
+Telemetry uses the same endpoint with `command = 0x03`:
 
 ```
 Client -> Server:
   POST / HTTP/2
-  Body: [handshake:57B] [_telemetry\n] [report_json]
+  Body: [handshake:57B] [0x03] [client_profile_version:4B] [0x00] [report_json]
 
 Server -> Client:
   200 OK
-  Body: [profile_size:4B] [profile_json or empty]
+  X-Nidhogg-Tunnel: 1
+  Body: [profile_version:4B] [profile_size:4B] [profile_json?]
 ```
+
+The `shaping_mode` byte is always `0x00` for telemetry — there is no
+relay to shape.
 
 Report format:
 ```json

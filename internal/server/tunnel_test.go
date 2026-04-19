@@ -139,6 +139,41 @@ func TestTunnelEchoShaped(t *testing.T) {
 	}
 }
 
+// TestTunnelEchoServerProfileClientNoShape covers the regression where the
+// server unconditionally framed the relay whenever a profile was active,
+// while a client with shaping disabled sent raw bytes — corrupting both
+// directions. The fix is for the server to only frame when the client
+// signals it will too.
+func TestTunnelEchoServerProfileClientNoShape(t *testing.T) {
+	psk := []byte("mixed-psk")
+	echoAddr := startEchoServer(t)
+
+	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
+	pm.Push(makeTestProfile())
+
+	srv := startTunnelServerWithPM(t, psk, pm)
+	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Disabled)
+
+	conn, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
+	if err != nil {
+		t.Fatalf("DialTunnel: %v", err)
+	}
+	defer conn.Close()
+
+	msg := []byte("raw client, profile-bearing server")
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if !bytes.Equal(buf, msg) {
+		t.Errorf("echo = %q, want %q", buf, msg)
+	}
+}
+
 func TestTunnelEcho(t *testing.T) {
 	psk := []byte("test-psk-key")
 	echoAddr := startEchoServer(t)

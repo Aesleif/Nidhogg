@@ -92,6 +92,7 @@ func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, err
 	var knownVersionBuf [4]byte
 	binary.BigEndian.PutUint32(knownVersionBuf[:], s.profileVersion)
 	header.Write(knownVersionBuf[:])
+	header.WriteByte(0) // shaping disabled — telemetry path is not relayed
 	json.NewEncoder(&header).Encode(report)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL, &header)

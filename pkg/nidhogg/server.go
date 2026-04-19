@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/server"
+	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/telemetry"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
@@ -176,6 +179,48 @@ func (s *Server) RecordTelemetry(report TelemetryReport) {
 		})
 	}
 }
+
+// ShapeRelay returns a (reader, writer) pair wrapped in traffic shaping
+// when the server has an active profile and the client signaled that it
+// will frame its traffic. Otherwise (r, w) are returned unchanged.
+//
+// External integrators (e.g. Xray-core) call this after sending the
+// inline profile but before starting the relay loop. The returned reader
+// unframes incoming bytes from the client, and the writer frames outgoing
+// bytes to the client, both using sizes drawn from the profile's CDF.
+//
+// The server side always uses stream-mode shaping (size padding only,
+// no artificial timing delays).
+func (s *Server) ShapeRelay(r io.Reader, w io.Writer, clientShaping bool) (io.Reader, io.Writer) {
+	if !clientShaping || s.pm == nil {
+		return r, w
+	}
+	prof := s.pm.Current()
+	if prof == nil {
+		return r, w
+	}
+	conn := &rwConn{r: r, w: w}
+	shaped := shaper.NewShapedConn(conn, prof, shaper.Stream)
+	return shaped, shaped
+}
+
+// rwConn adapts an io.Reader / io.Writer pair to net.Conn so that
+// ShapedConn (which wraps a net.Conn) can drive the underlying transport.
+// All address and deadline methods are no-ops — the surrounding HTTP/2
+// transport handles those.
+type rwConn struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (c *rwConn) Read(b []byte) (int, error)       { return c.r.Read(b) }
+func (c *rwConn) Write(b []byte) (int, error)      { return c.w.Write(b) }
+func (c *rwConn) Close() error                     { return nil }
+func (c *rwConn) LocalAddr() net.Addr              { return &net.TCPAddr{IP: net.IPv4zero} }
+func (c *rwConn) RemoteAddr() net.Addr             { return &net.TCPAddr{IP: net.IPv4zero} }
+func (c *rwConn) SetDeadline(time.Time) error      { return nil }
+func (c *rwConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *rwConn) SetWriteDeadline(time.Time) error { return nil }
 
 // Close releases resources held by the server.
 func (s *Server) Close() error {

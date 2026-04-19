@@ -26,6 +26,27 @@ const (
 	Stealth
 )
 
+// EncodeMode encodes a ShapingMode as a single wire byte.
+// Disabled → 0, Stream → 1, Balanced → 2, Stealth → 3.
+func EncodeMode(m ShapingMode) byte {
+	return byte(m + 1)
+}
+
+// DecodeMode decodes a wire byte into a ShapingMode. Unknown values
+// fall back to Disabled.
+func DecodeMode(b byte) ShapingMode {
+	switch b {
+	case 1:
+		return Stream
+	case 2:
+		return Balanced
+	case 3:
+		return Stealth
+	default:
+		return Disabled
+	}
+}
+
 // ParseMode maps a config string to a ShapingMode.
 // Empty string returns Disabled.
 func ParseMode(name string) (ShapingMode, error) {
