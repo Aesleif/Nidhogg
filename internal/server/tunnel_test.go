@@ -139,6 +139,112 @@ func TestTunnelEchoShaped(t *testing.T) {
 	}
 }
 
+// TestTunnelEchoShapedSecondCall covers the regression where the dialer
+// dropped the parsed profile on the second call (server skipped JSON via
+// version cache → prof returned nil → client unwrapped ShapedConn while
+// the server was still framing). The dialer must keep the profile cached.
+func TestTunnelEchoShapedSecondCall(t *testing.T) {
+	psk := []byte("cached-psk")
+	echoAddr := startEchoServer(t)
+
+	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
+	pm.Push(makeTestProfile())
+
+	srv := startTunnelServerWithPM(t, psk, pm)
+	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Balanced)
+
+	// First call: server delivers profile JSON, dialer caches it.
+	conn1, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
+	if err != nil {
+		t.Fatalf("first DialTunnel: %v", err)
+	}
+	conn1.Close()
+
+	// Second call: server sees matching version, sends size=0. Without
+	// the cache the dialer would return a raw conn while the server
+	// keeps framing → echo would be corrupted.
+	conn2, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
+	if err != nil {
+		t.Fatalf("second DialTunnel: %v", err)
+	}
+	defer conn2.Close()
+
+	msg := []byte("second call still shaped")
+	if _, err := conn2.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn2, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if !bytes.Equal(buf, msg) {
+		t.Errorf("second-call echo = %q, want %q", buf, msg)
+	}
+}
+
+// TestTunnelEchoUDPWithShaping covers the regression where the dialer
+// wrapped UDP destinations in ShapedConn even though the server's UDP
+// path bypasses shaping. The two framing layers (shaper frames vs UDP
+// length-prefix datagrams) collided and corrupted every packet.
+func TestTunnelEchoUDPWithShaping(t *testing.T) {
+	psk := []byte("udp-shape-psk")
+
+	// Echo server that reads UDP datagrams and bounces them back.
+	udpLn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpLn.Close()
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, addr, err := udpLn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			udpLn.WriteTo(buf[:n], addr)
+		}
+	}()
+
+	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
+	pm.Push(makeTestProfile())
+
+	srv := startTunnelServerWithPM(t, psk, pm)
+	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Balanced)
+
+	conn, _, _, err := dialer.DialTunnel(context.Background(), "udp:"+udpLn.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("DialTunnel: %v", err)
+	}
+	defer conn.Close()
+
+	// UDP framing from the public API expects [2B length][payload].
+	msg := []byte("udp ping under shaping")
+	frame := make([]byte, 2+len(msg))
+	frame[0] = byte(len(msg) >> 8)
+	frame[1] = byte(len(msg))
+	copy(frame[2:], msg)
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("Write frame: %v", err)
+	}
+
+	respHdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, respHdr); err != nil {
+		t.Fatalf("read response header: %v", err)
+	}
+	respLen := int(respHdr[0])<<8 | int(respHdr[1])
+	if respLen != len(msg) {
+		t.Fatalf("response length = %d, want %d", respLen, len(msg))
+	}
+	respPayload := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respPayload); err != nil {
+		t.Fatalf("read response payload: %v", err)
+	}
+	if !bytes.Equal(respPayload, msg) {
+		t.Errorf("udp echo = %q, want %q", respPayload, msg)
+	}
+}
+
 // TestTunnelEchoServerProfileClientNoShape covers the regression where the
 // server unconditionally framed the relay whenever a profile was active,
 // while a client with shaping disabled sent raw bytes — corrupting both

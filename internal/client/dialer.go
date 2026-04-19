@@ -30,6 +30,7 @@ type Dialer struct {
 	client          *http.Client
 	shapingMode     shaper.ShapingMode
 	profileVersion  atomic.Uint32
+	cachedProfile   atomic.Pointer[profile.Profile]
 	ProfileOverride atomic.Pointer[profile.Profile]
 }
 
@@ -151,9 +152,14 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 			return nil, nil, 0, fmt.Errorf("parse profile: %w", err)
 		}
 		d.profileVersion.Store(serverVersion)
+		d.cachedProfile.Store(prof)
 	} else if serverVersion != 0 {
-		// Server has a profile but version matches — we already have it
+		// Server has a profile but version matches — reuse the cached one.
+		// Without this the next Dial() would return a nil profile and
+		// disable client-side shaping while the server keeps shaping
+		// (because clientShaping is signaled per-request, not per-profile).
 		d.profileVersion.Store(serverVersion)
+		prof = d.cachedProfile.Load()
 	}
 
 	baseConn := &tunnelConn{
@@ -166,7 +172,11 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 		activeProf = prof
 	}
 
-	if activeProf != nil && d.shapingMode != shaper.Disabled {
+	// UDP tunnels are framed at the application layer (length-prefixed
+	// datagrams) and the server bypasses ShapedConn for them, so the
+	// client must too — otherwise the framing layers collide and parse
+	// each other as garbage.
+	if activeProf != nil && d.shapingMode != shaper.Disabled && dd.Command != transport.CommandUDP {
 		return shaper.NewShapedConn(baseConn, activeProf, d.shapingMode), prof, handshakeRTT, nil
 	}
 	return baseConn, prof, handshakeRTT, nil
