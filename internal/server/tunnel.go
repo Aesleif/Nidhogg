@@ -81,13 +81,18 @@ func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *t
 		dest := d.Addr()
 		network := d.Network()
 
-		// Connect to upstream target
-		tcpUpstream, err := net.Dial(network, dest)
+		// Connect to upstream target. Wrap in IdleConn so half-dead
+		// tunnels (silent peer + silent source) get force-closed instead
+		// of leaking goroutines and h2 stream buffers indefinitely.
+		// The closeOnce relay fix only fires when ONE side exits — idle
+		// timeout covers the case where BOTH sides are blocked on Read.
+		dialedUpstream, err := net.Dial(network, dest)
 		if err != nil {
 			slog.Warn("tunnel: failed to dial upstream", "dest", dest, "err", err)
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		tcpUpstream := transport.NewIdleConn(dialedUpstream, 5*time.Minute)
 		defer tcpUpstream.Close()
 
 		startTime := time.Now()

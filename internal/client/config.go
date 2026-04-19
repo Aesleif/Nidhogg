@@ -24,6 +24,7 @@ type Config struct {
 	ConsecutiveFailures int    `json:"consecutive_failures"` // write errors before unhealthy, default 3
 	TelemetryInterval   string `json:"telemetry_interval"`   // e.g. "30s", default "30s"
 	ConnectionPoolSize  int    `json:"connection_pool_size"` // parallel TCP+TLS connections, default 4
+	IdleTimeout         string `json:"idle_timeout"`         // close tunnel after no activity, e.g. "5m", default "5m"
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -71,6 +72,12 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ConnectionPoolSize <= 0 {
 		cfg.ConnectionPoolSize = 4
 	}
+	if cfg.IdleTimeout == "" {
+		cfg.IdleTimeout = "5m"
+	}
+	if _, err := time.ParseDuration(cfg.IdleTimeout); err != nil {
+		return nil, fmt.Errorf("invalid idle_timeout: %w", err)
+	}
 
 	return &cfg, nil
 }
@@ -79,6 +86,14 @@ func (c *Config) TelemetryIntervalDuration() time.Duration {
 	d, err := time.ParseDuration(c.TelemetryInterval)
 	if err != nil || d <= 0 {
 		return 30 * time.Second
+	}
+	return d
+}
+
+func (c *Config) IdleTimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(c.IdleTimeout)
+	if err != nil || d <= 0 {
+		return 5 * time.Minute
 	}
 	return d
 }

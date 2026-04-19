@@ -29,6 +29,7 @@ type Dialer struct {
 	psk             []byte
 	client          *http.Client
 	shapingMode     shaper.ShapingMode
+	idleTimeout     time.Duration
 	profileVersion  atomic.Uint32
 	cachedProfile   atomic.Pointer[profile.Profile]
 	ProfileOverride atomic.Pointer[profile.Profile]
@@ -40,7 +41,10 @@ type Dialer struct {
 // poolSize sets how many parallel TCP+TLS connections the HTTP/2 transport
 // keeps to the server (mitigates TCP head-of-line blocking). Values <=1
 // keep the default single-connection pool.
-func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int) *Dialer {
+// idleTimeout closes a tunnel conn after that long without Read/Write
+// activity. Zero disables the idle timer (use with care; tunnels stuck on
+// silent peers will leak goroutines + h2 stream buffers indefinitely).
+func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int, idleTimeout time.Duration) *Dialer {
 	helloID, _ := transport.FingerprintID(fingerprint) // validated in config
 
 	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -48,8 +52,9 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 	}
 
 	h2transport := &http2.Transport{
-		// 1MB DATA frames amortize per-frame overhead on bulk transfers.
-		MaxReadFrameSize: 1 << 20,
+		// 64 KiB frame size — see server config for rationale (memory vs
+		// per-frame overhead tradeoff).
+		MaxReadFrameSize: 1 << 16,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 			return dialTLS(ctx, network, addr)
 		},
@@ -64,7 +69,7 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 			})
 		}
 		h2transport = &http2.Transport{
-			MaxReadFrameSize: 1 << 20,
+			MaxReadFrameSize: 1 << 16,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: insecure,
 			},
@@ -83,6 +88,7 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 		psk:         psk,
 		client:      &http.Client{Transport: h2transport},
 		shapingMode: shapingMode,
+		idleTimeout: idleTimeout,
 	}
 }
 
@@ -183,10 +189,15 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 		prof = d.cachedProfile.Load()
 	}
 
-	baseConn := &tunnelConn{
+	var conn net.Conn = &tunnelConn{
 		reader: resp.Body,
 		writer: pw,
 	}
+
+	// Bound the tunnel's lifetime when no traffic flows. h2 stream itself
+	// has no per-stream idle limit; without this, half-dead tunnels keep
+	// their goroutines + 64 KiB scratch buffer alive indefinitely.
+	conn = transport.NewIdleConn(conn, d.idleTimeout)
 
 	activeProf := d.ProfileOverride.Load()
 	if activeProf == nil {
@@ -198,9 +209,9 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	// client must too — otherwise the framing layers collide and parse
 	// each other as garbage.
 	if activeProf != nil && d.shapingMode != shaper.Disabled && dd.Command != transport.CommandUDP {
-		return shaper.NewShapedConn(baseConn, activeProf, d.shapingMode), prof, handshakeRTT, nil
+		return shaper.NewShapedConn(conn, activeProf, d.shapingMode), prof, handshakeRTT, nil
 	}
-	return baseConn, prof, handshakeRTT, nil
+	return conn, prof, handshakeRTT, nil
 }
 
 // tunnelConn adapts an HTTP/2 streaming response into a net.Conn.

@@ -3,6 +3,7 @@ package nidhogg
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aesleif/nidhogg/internal/client"
 )
@@ -26,6 +27,11 @@ type ClientConfig struct {
 	// the HTTP/2 transport keeps to the server. Default: 4 (when zero).
 	// Set to 1 to use a single connection.
 	ConnectionPoolSize int
+	// IdleTimeout closes a tunnel after that long without Read/Write
+	// activity. Bounds the cost of half-dead tunnels stuck on silent
+	// peers. Default: 5 minutes (when zero). Set to a negative value
+	// to disable (not recommended for long-running clients).
+	IdleTimeout time.Duration
 }
 
 // Client creates tunnel connections to a nidhogg server.
@@ -50,6 +56,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.ConnectionPoolSize == 0 {
 		cfg.ConnectionPoolSize = 4
 	}
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = 5 * time.Minute
+	}
 
 	d := client.NewDialer(
 		cfg.Server,
@@ -59,6 +68,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		cfg.Fingerprint,
 		toInternalMode(cfg.ShapingMode),
 		cfg.ConnectionPoolSize,
+		cfg.IdleTimeout,
 	)
 	return &Client{dialer: d}, nil
 }

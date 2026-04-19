@@ -9,5 +9,6 @@
   "log_level": "info",
   "max_rtt_ms": 2000,
   "consecutive_failures": 3,
-  "connection_pool_size": 4
+  "connection_pool_size": 4,
+  "idle_timeout": "5m"
 }
