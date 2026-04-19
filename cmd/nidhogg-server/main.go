@@ -72,6 +72,11 @@ func main() {
 		MaxUploadBufferPerStream:     8 << 20,
 		MaxUploadBufferPerConnection: 64 << 20,
 		MaxReadFrameSize:             1 << 20,
+		// Keepalive: ping idle connections and close ones whose peer
+		// silently went away. Without this, half-dead clients (NAT
+		// timeout, RST lost) leak goroutines blocked on io.Copy.
+		ReadIdleTimeout: 30 * time.Second,
+		PingTimeout:     15 * time.Second,
 	}); err != nil {
 		log.Fatalf("failed to configure HTTP/2: %v", err)
 	}

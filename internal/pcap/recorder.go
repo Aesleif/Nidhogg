@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// maxSamples caps the per-connection sample buffer. CDF generation needs
+// only a few hundred samples; further entries waste memory on long-lived
+// tunnels (websockets, large downloads) which would otherwise grow the
+// slice indefinitely.
+const maxSamples = 10_000
+
 // PacketSample records the size and direction of a single read/write operation.
 type PacketSample struct {
 	Size      int
@@ -37,11 +43,13 @@ func (c *RecordingConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		c.mu.Lock()
-		c.samples = append(c.samples, PacketSample{
-			Size:      n,
-			Direction: false,
-			Timestamp: time.Now(),
-		})
+		if len(c.samples) < maxSamples {
+			c.samples = append(c.samples, PacketSample{
+				Size:      n,
+				Direction: false,
+				Timestamp: time.Now(),
+			})
+		}
 		c.mu.Unlock()
 	}
 	return n, err
@@ -51,11 +59,13 @@ func (c *RecordingConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
 	if n > 0 {
 		c.mu.Lock()
-		c.samples = append(c.samples, PacketSample{
-			Size:      n,
-			Direction: true,
-			Timestamp: time.Now(),
-		})
+		if len(c.samples) < maxSamples {
+			c.samples = append(c.samples, PacketSample{
+				Size:      n,
+				Direction: true,
+				Timestamp: time.Now(),
+			})
+		}
 		c.mu.Unlock()
 	}
 	return n, err

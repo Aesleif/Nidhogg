@@ -230,6 +230,31 @@ func TestConcurrentValidation(t *testing.T) {
 	}
 }
 
+// TestNoncesHardCap covers the regression where the nonce map grew without
+// bound under sustained load: every fresh nonce escapes the time-based
+// sweep (it's younger than 2*maxClockSkew), so without the hard cap the
+// map climbed past nonceRingSize indefinitely.
+func TestNoncesHardCap(t *testing.T) {
+	psk := []byte("cap-key")
+	v := NewValidator(psk)
+
+	for i := 0; i < nonceRingSize*5; i++ {
+		data, err := GenerateHandshake(psk)
+		if err != nil {
+			t.Fatalf("GenerateHandshake[%d]: %v", i, err)
+		}
+		ok, err := v.Validate(data)
+		if !ok {
+			t.Fatalf("Validate[%d]: %v", i, err)
+		}
+		if got := len(v.nonces); got > nonceRingSize+1 {
+			// Map briefly hits nonceRingSize+1 before eviction triggers
+			// inside Validate; never above that.
+			t.Fatalf("after %d inserts, len(nonces) = %d, want <= %d", i+1, got, nonceRingSize+1)
+		}
+	}
+}
+
 func TestHandshakeFormat(t *testing.T) {
 	psk := []byte("format-key")
 	data, _ := GenerateHandshake(psk)

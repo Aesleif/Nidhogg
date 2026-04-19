@@ -100,13 +100,25 @@ func (v *HandshakeValidator) Validate(data []byte) (bool, error) {
 
 	v.nonces[nonce] = int64(tsMs)
 
-	// Evict expired nonces when map grows too large
+	// Evict expired nonces when map grows too large.
 	if len(v.nonces) > nonceRingSize {
 		cutoff := v.now().Add(-2 * maxClockSkew).UnixMilli()
 		for k, ts := range v.nonces {
 			if ts < cutoff {
 				delete(v.nonces, k)
 			}
+		}
+		// Hard cap: under sustained load every nonce may still be fresh
+		// (younger than 2*maxClockSkew), so the time sweep alone can't
+		// shrink the map. Drop arbitrary entries until back at capacity.
+		// Trade-off: a tiny replay window opens for evicted-but-still-fresh
+		// nonces. Acceptable for proxy auth — replay only re-opens a tunnel
+		// the client legitimately opened once.
+		for k := range v.nonces {
+			if len(v.nonces) <= nonceRingSize {
+				break
+			}
+			delete(v.nonces, k)
 		}
 	}
 
