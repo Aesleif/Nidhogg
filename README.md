@@ -11,15 +11,16 @@ Nidhogg tunnels network traffic through an HTTPS reverse proxy using HTTP/2 POST
 
 **Key features:**
 
-- HTTP/2 POST streaming tunnel over TLS with multi-connection client pool
+- HTTP/2 POST streaming tunnel over TLS with multi-connection client pool and periodic connection recycling
 - Adaptive traffic shaping from real HTTPS profiles (CDF-based packet sizing and timing)
 - uTLS fingerprint randomization (Chrome, Firefox, Safari, or random)
 - PSK-authenticated handshake (HMAC-SHA256 with replay-protected nonce)
 - Automatic profile rotation on connection degradation
 - UDP over TCP (UoT) -- tunnel UDP datagrams (QUIC, DNS) through the TCP tunnel
 - Per-connection health monitoring with server telemetry feedback
+- Idle-timeout on tunnels and bounded internal state -- designed for long uptimes
+- Built-in pprof endpoint (loopback) for heap / goroutine / CPU diagnostics
 - Public Go API (`pkg/nidhogg`) for embedding in proxy frameworks (Xray-core, sing-box)
-- Bounded memory footprint -- safe for long-running production servers
 - Server appears as a normal HTTPS reverse proxy to external observers
 
 ## How it works
@@ -142,6 +143,8 @@ Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | `consecutive_failures` | int | `3` | Write errors before marking connection critical |
 | `telemetry_interval` | string | `"30s"` | Health telemetry reporting interval |
 | `connection_pool_size` | int | `4` | Parallel TCP+TLS connections (1 = single conn) |
+| `idle_timeout` | string | `"5m"` | Close a tunnel after no Read/Write activity for this duration |
+| `connection_max_age` | string | `"1h"` | Recycle pooled HTTP/2 connections older than this (graceful shutdown + redial) |
 
 ### Shaping modes
 
@@ -177,8 +180,8 @@ See [docs/architecture.md](docs/architecture.md) for protocol details and design
 Nidhogg is integrated as a full protocol (`"protocol": "nidhogg"`) in a
 [forked Xray-core](https://github.com/aesleif/Xray-core), supporting both
 inbound (server) and outbound (client) handlers including UDP dispatch.
-The author's production deployment uses tproxy + Xray's HTTP/2 multiplexing
-through the nidhogg outbound.
+A typical gateway deployment puts Xray on a tproxy box with the nidhogg
+outbound, multiplexing all client TCP/UDP through the HTTP/2 tunnel.
 
 The public Go API in `pkg/nidhogg/` provides `Client` and `Server` types for
 embedding into other proxy frameworks. Server-side integrators implement the

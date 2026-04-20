@@ -37,6 +37,7 @@ If you discover a security vulnerability, please report it responsibly:
 - **Auth-layer forward secrecy:** PSK + HMAC has no forward secrecy. If the PSK leaks, all future handshakes from any client can be forged. (TLS gives FS on the data channel via ECDHE, but that protects the bytes, not the auth.)
 - **No third-party crypto / security audit:** Single-author project, no external review. Absence of known issues is not evidence of safety.
 - **Server bandwidth amplification via reverse proxy fallback:** A bogus handshake forwards the request to the configured reverse-proxy upstream. Picking a heavy upstream means an attacker can use Nidhogg as a free request relay — pick a static cover site.
+- **Local pprof endpoint exposure:** The standalone server and client bind `net/http/pprof` to `127.0.0.1:6060` / `:6061` for diagnostics. The loopback bind is the security boundary — there is no auth. On a multi-tenant box, any other local user or process able to connect to `127.0.0.1` can pull heap dumps, which contain whatever was in process memory at the time (including the PSK after it was loaded). Mitigation: deploy on single-tenant boxes only, gate the port with a host firewall, or build with the pprof block removed for production binaries.
 
 ### Known limitations
 

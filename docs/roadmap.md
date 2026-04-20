@@ -17,26 +17,37 @@ are roughly ordered by priority.
 
 ### Performance
 - HTTP/2 server tuning: `MaxConcurrentStreams=1000`, upload buffers
-  8 MiB / 64 MiB, `MaxReadFrameSize=1 MiB`
+  8 MiB / 64 MiB, `MaxReadFrameSize=64 KiB`
 - HTTP/2 keepalive: `ReadIdleTimeout=30s` + `PingTimeout=15s` to drop
   half-dead connections
 - Client connection pool: round-robin streams across N parallel TCP+TLS
   connections (default 4) to mitigate TCP head-of-line blocking
-- Client `MaxReadFrameSize=1 MiB` to amortize per-frame overhead
+- Periodic ClientConn recycling (`connection_max_age`, default 1h) via
+  graceful `Shutdown(ctx) → Close()` — prevents accumulated h2 internal
+  state from degrading latency over uptime
+- Client `MaxReadFrameSize=64 KiB` to amortize per-frame overhead while
+  keeping per-stream scratch buffers small
 
 ### Security and reliability
 - Nonce replay protection with timestamp window (±60s) and ring map
 - Hard-cap on `nonces` map (prevents unbounded growth under load)
 - Bounded `RecordingConn.samples` (10K cap, prevents per-connection leaks)
+- Tunnel idle timeout (`transport.IdleConn`) closes Read/Write-idle
+  tunnels after `idle_timeout` (default 5 min)
 - Shaping mode negotiation byte (client tells server whether to frame the
   relay; mismatched framing previously corrupted every byte)
 - Profile cache in client dialer (preserves shaping when server skips
   JSON via version cache)
+- Reverse-proxy upstream transport with explicit `IdleConnTimeout` and
+  bounded idle pool
 
-### Production
-- Replaced VLESS-Reality on the author's personal anti-censorship gateway
-  in April 2026
-- Running as systemd-managed service with Let's Encrypt autocert
+### Observability
+- `net/http/pprof` endpoints on loopback (`:6060` server, `:6061` client)
+- Block + mutex profiles enabled by default (full sampling rate)
+- `collect-pprof.sh` fetches the full 5-profile suite (heap, goroutine,
+  CPU 30s sample, block, mutex) over SSH for diff-based analysis
+- ProfileManager logs p50/p95/p99 of send-size CDF on every regenerate
+  for drift detection
 
 ## Next up
 
@@ -137,3 +148,7 @@ itself), JA3S currently identifies it as Go.
 - **Pluggable transport** spec compliance (Tor's `pt_2.1`) — would let
   Tor Browser use Nidhogg as a bridge
 - **Observability** — Prometheus metrics endpoint behind auth
+- **Build tag to drop pprof** for hardened builds (heap dumps can leak
+  in-memory secrets to anyone with loopback access on the host)
+- **Absolute tunnel max-age** as a fallback for pseudo-active streams
+  that current ClientConn recycling doesn't cover quickly enough

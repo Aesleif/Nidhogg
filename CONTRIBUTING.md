@@ -39,10 +39,33 @@ go test ./...
 - **Regression tests for known bugs** &mdash; name them after the failure
   scenario and include a comment explaining what broke before the fix.
   Examples: `TestTunnelEchoServerProfileClientNoShape`,
-  `TestTunnelEchoUDPWithShaping`, `TestRecordingConnCapsSamples`.
+  `TestTunnelEchoUDPWithShaping`, `TestRecordingConnCapsSamples`,
+  `TestIdleConnClosesAfterTimeout`, `TestPoolRecyclesAfterMaxAge`,
+  `TestTunnelClosesUpstreamWhenClientDisconnects`.
 - **Running a subset** &mdash; `go test ./internal/client/... -run TestPool -v`
 - **Race detector** &mdash; for any change touching `internal/client/pool.go`,
-  `internal/transport/handshake.go`, or shaper buffers, run with `-race`.
+  `internal/transport/handshake.go`, `internal/transport/idle.go`, or
+  shaper buffers, run with `-race`.
+
+## Diagnosing latency or memory regressions
+
+The standalone binaries expose `net/http/pprof` on loopback (`:6060` for
+server, `:6061` for client) and enable block + mutex profiles by
+default. The repo's `collect-pprof.sh` fetches the full set (heap,
+goroutine, CPU, block, mutex) over SSH:
+
+```bash
+./collect-pprof.sh host port login pass fresh        # right after restart
+# ...let the issue manifest...
+./collect-pprof.sh host port login pass degraded
+go tool pprof -top -diff_base fresh/cpu.pprof   degraded/cpu.pprof | head -30
+go tool pprof -top -diff_base fresh/heap.pprof  degraded/heap.pprof | head -30
+go tool pprof -top -diff_base fresh/block.pprof degraded/block.pprof | head -30
+```
+
+`-diff_base` highlights only what grew between snapshots, which is the
+fastest path to a real culprit when the symptom is a slow drift over
+hours of uptime.
 
 ## Issues
 

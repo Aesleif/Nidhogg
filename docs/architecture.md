@@ -203,6 +203,63 @@ Behavior:
 - TLS dial reuses `transport.DialTLS` so the uTLS fingerprint is preserved
   on every pooled connection.
 
+### Periodic recycling
+
+Each pool slot stores a `pooledConn{cc, bornAt}`. When `GetClientConn`
+sees a slot older than `maxAge` (default 1 hour, configurable via
+`connection_max_age`), it asynchronously retires it:
+
+```go
+go func() {
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    cc.Shutdown(ctx)  // refuses new streams, waits for in-flight to drain
+    cc.Close()
+}()
+```
+
+The next `GetClientConn` call dials a fresh replacement. This solves two
+problems that surface only after long uptime:
+
+1. **Stale h2 internal state** — `ClientConn.streams` is a map that
+   grows monotonically as streams open and only shrinks on rehash. After
+   millions of streams an aged conn carries a much larger map than its
+   live stream count, slowing every operation.
+2. **Stuck pseudo-active tunnels** — a tunnel that exchanges a small
+   keepalive every 30s never trips the per-conn idle timer, but its
+   relay goroutines are still parked on Reads that may never return
+   useful data. Closing the parent ClientConn force-closes all its
+   streams, freeing those goroutines and the h2 scratch buffers each
+   was holding.
+
+## Tunnel idle timeout
+
+`internal/transport/idle.go` provides `IdleConn`, a `net.Conn` wrapper
+that closes the underlying connection after a configurable period of no
+Read/Write activity. It uses a single `time.AfterFunc` (no per-conn
+goroutine until it fires) and `bumps` the deadline forward on every
+non-zero Read or Write.
+
+Applied on both sides:
+- Client: `internal/client/dialer.go` wraps the freshly-opened
+  `tunnelConn` in `IdleConn(idleTimeout)` before optional `ShapedConn`
+  wrapping. Default `idleTimeout` is 5 minutes, configurable via the
+  `idle_timeout` client config field.
+- Server: `internal/server/tunnel.go` wraps `tcpUpstream` after `net.Dial`.
+  Hardcoded 5 minutes today.
+
+Why: `wg.Wait()` in the relay loop only returns once both directions
+exit. If both Read calls block forever (silent client + silent upstream),
+neither relay goroutine completes, the WaitGroup never releases, and the
+handler can't run its `defer tcpUpstream.Close()`. The idle timer breaks
+this stalemate by force-closing the conn, which wakes both Reads with an
+error.
+
+Limitation: a tunnel with sparse but periodic activity (websocket pings
+every 30s, MTProto keepalive) keeps bumping the timer and never trips it.
+That class of stuck tunnels is handled by ConnPool max-age recycling
+instead — see below.
+
 ## HTTP/2 server tuning
 
 Both standalone (`cmd/nidhogg-server/main.go` via `http2.ConfigureServer`)
@@ -214,29 +271,39 @@ and the Xray inbound (`Xray-core/proxy/nidhogg/server.go`) configure the
 | `MaxConcurrentStreams` | 1000 | Default 250 throttles burst tproxy load |
 | `MaxUploadBufferPerStream` | 8 MiB | Default 1 MiB causes WINDOW_UPDATE round-trips on bulk uploads |
 | `MaxUploadBufferPerConnection` | 64 MiB | Headroom for many parallel streams |
-| `MaxReadFrameSize` | 1 MiB | Default 16 KiB means many tiny DATA frames; 1 MiB amortizes per-frame overhead |
+| `MaxReadFrameSize` | 64 KiB | Default 16 KiB is too small for bulk overhead; 1 MiB blew up per-stream scratch buffers (each h2 client stream allocates one frame-sized scratch — at 200 streams that was 200 MB). 64 KiB is the sweet spot between per-frame overhead and per-stream memory cost |
 | `ReadIdleTimeout` | 30 s | Send PING after 30s of silence |
 | `PingTimeout` | 15 s | Drop connection if PING is unanswered — kills hung relay goroutines on dead clients |
 
-The client also sets `MaxReadFrameSize=1MiB` on its `http2.Transport`. The
-default client receive windows (1 GiB connection / 4 MiB per stream) are
-already generous and not exposed for tuning by upstream `x/net/http2`.
+The client also sets `MaxReadFrameSize=64 KiB` on its `http2.Transport`.
+The default client receive windows (1 GiB connection / 4 MiB per stream)
+are already generous and not exposed for tuning by upstream `x/net/http2`.
 
 ## Profiling
 
 Both the standalone server and the standalone client expose `net/http/pprof`
 on a loopback-only listener (`127.0.0.1:6060` for the server,
 `127.0.0.1:6061` for the client). No auth is configured — bind on loopback
-is the security boundary. SSH-tunnel from the operator box:
+is the security boundary (see [SECURITY.md](../SECURITY.md) for the
+local-tenant caveat).
+
+Both binaries also call `runtime.SetBlockProfileRate(1)` and
+`runtime.SetMutexProfileFraction(1)` at startup, so `/debug/pprof/block`
+and `/debug/pprof/mutex` return useful data — needed for diagnosing
+latency or contention regressions that don't show up in heap.
+
+The repo's `collect-pprof.sh` fetches all five profiles (heap, goroutine,
+CPU 30s sample, block, mutex) over SSH:
 
 ```bash
 ssh -L 6060:localhost:6060 server-host    # for the standalone server
 ssh -L 6061:localhost:6061 client-host    # for the standalone client
 
-curl -o heap.pprof      http://127.0.0.1:6060/debug/pprof/heap
-curl -o goroutine.pprof http://127.0.0.1:6060/debug/pprof/goroutine
-go tool pprof -top heap.pprof | head -20
-go tool pprof -top goroutine.pprof | head -20
+./collect-pprof.sh host port login pass fresh        # right after restart
+./collect-pprof.sh host port login pass degraded     # later under load
+go tool pprof -top -diff_base fresh/cpu.pprof   degraded/cpu.pprof | head -20
+go tool pprof -top -diff_base fresh/heap.pprof  degraded/heap.pprof | head -20
+go tool pprof -top -diff_base fresh/block.pprof degraded/block.pprof | head -20
 ```
 
 When nidhogg runs as an Xray outbound (`pkg/nidhogg` embedded in Xray-core),
@@ -261,8 +328,8 @@ fork via the `_ "net/http/pprof"` import.
 
 ## Memory bounds
 
-The server is meant to run for weeks under sustained load. Two structures
-that previously grew without bound now have explicit caps:
+Several structures that previously grew without bound now have explicit
+caps so the process can run for weeks under sustained load:
 
 - **`internal/pcap/recorder.go`** — `RecordingConn.samples` is capped at
   10,000 entries (`maxSamples`). Beyond the cap, Read/Write skip the append.
@@ -275,6 +342,14 @@ that previously grew without bound now have explicit caps:
   fresh under sustained load), arbitrary entries are dropped down to the
   cap. Trade-off: a brief replay window for the evicted entries; see
   [SECURITY.md](../SECURITY.md) for the analysis.
+- **`internal/transport/idle.go`** — `IdleConn` bounds tunnel lifetime
+  by activity. Tunnels stuck on silent peers no longer leak goroutines
+  and 64 KiB h2 scratch buffers indefinitely; see "Tunnel idle timeout"
+  above.
+- **`internal/client/pool.go`** — pooled `*http2.ClientConn` instances
+  are recycled by age (default 1 hour). Per-conn h2 internal state
+  (streams map, HPACK tables, frame queues) cannot accumulate beyond a
+  bounded window; see "Client connection pool → Periodic recycling".
 
 ## Health monitoring
 
