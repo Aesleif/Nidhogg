@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -116,6 +117,11 @@ func main() {
 	// pprof on loopback for production heap/goroutine profiling.
 	// Bound to 127.0.0.1 so no auth needed; ssh-tunnel from the operator
 	// box to access (`ssh -L 6060:localhost:6060 server`).
+	// Block + mutex profiles are sampled at full rate — small CPU cost in
+	// exchange for being able to debug latency/contention regressions
+	// without redeploy. Lower the rate (e.g. 1000) if it ever shows up.
+	runtime.SetBlockProfileRate(1)
+	runtime.SetMutexProfileFraction(1)
 	go func() {
 		const addr = "127.0.0.1:6060"
 		slog.Info("starting pprof", "addr", addr)

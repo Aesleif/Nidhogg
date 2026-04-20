@@ -25,6 +25,7 @@ type Config struct {
 	TelemetryInterval   string `json:"telemetry_interval"`   // e.g. "30s", default "30s"
 	ConnectionPoolSize  int    `json:"connection_pool_size"` // parallel TCP+TLS connections, default 4
 	IdleTimeout         string `json:"idle_timeout"`         // close tunnel after no activity, e.g. "5m", default "5m"
+	ConnectionMaxAge    string `json:"connection_max_age"`   // recycle pooled HTTP/2 conns after this age, e.g. "1h", default "1h"
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -78,6 +79,12 @@ func LoadConfig(path string) (*Config, error) {
 	if _, err := time.ParseDuration(cfg.IdleTimeout); err != nil {
 		return nil, fmt.Errorf("invalid idle_timeout: %w", err)
 	}
+	if cfg.ConnectionMaxAge == "" {
+		cfg.ConnectionMaxAge = "1h"
+	}
+	if _, err := time.ParseDuration(cfg.ConnectionMaxAge); err != nil {
+		return nil, fmt.Errorf("invalid connection_max_age: %w", err)
+	}
 
 	return &cfg, nil
 }
@@ -94,6 +101,14 @@ func (c *Config) IdleTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(c.IdleTimeout)
 	if err != nil || d <= 0 {
 		return 5 * time.Minute
+	}
+	return d
+}
+
+func (c *Config) ConnectionMaxAgeDuration() time.Duration {
+	d, err := time.ParseDuration(c.ConnectionMaxAge)
+	if err != nil || d <= 0 {
+		return time.Hour
 	}
 	return d
 }

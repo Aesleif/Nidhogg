@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -51,7 +52,7 @@ func TestPoolCreatesUpToSize(t *testing.T) {
 	addr := startH2CServer(t)
 	tr := newTransport()
 	dial, calls := rawDialer(t, addr)
-	pool := NewConnPool(tr, 3, dial)
+	pool := NewConnPool(tr, 3, 0, dial)
 
 	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
 	for i := 0; i < 3; i++ {
@@ -72,7 +73,7 @@ func TestPoolRoundRobins(t *testing.T) {
 	addr := startH2CServer(t)
 	tr := newTransport()
 	dial, _ := rawDialer(t, addr)
-	pool := NewConnPool(tr, 3, dial)
+	pool := NewConnPool(tr, 3, 0, dial)
 
 	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
 
@@ -114,7 +115,7 @@ func TestPoolMarkDeadRemoves(t *testing.T) {
 	addr := startH2CServer(t)
 	tr := newTransport()
 	dial, calls := rawDialer(t, addr)
-	pool := NewConnPool(tr, 2, dial)
+	pool := NewConnPool(tr, 2, 0, dial)
 
 	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
 
@@ -153,7 +154,7 @@ func TestPoolConcurrentGet(t *testing.T) {
 	addr := startH2CServer(t)
 	tr := newTransport()
 	dial, calls := rawDialer(t, addr)
-	pool := NewConnPool(tr, 4, dial)
+	pool := NewConnPool(tr, 4, 0, dial)
 
 	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
 
@@ -175,5 +176,47 @@ func TestPoolConcurrentGet(t *testing.T) {
 	// Should have dialed at most pool size, regardless of concurrency.
 	if got := calls.Load(); got > 4 {
 		t.Errorf("dial calls = %d, want ≤ 4", got)
+	}
+}
+
+// TestPoolRecyclesAfterMaxAge verifies that connections older than maxAge
+// are dropped from the pool and replaced with fresh ones, addressing the
+// gradual latency degradation that comes from long-lived ClientConns
+// accumulating internal h2 state and riding stale TCP paths.
+func TestPoolRecyclesAfterMaxAge(t *testing.T) {
+	addr := startH2CServer(t)
+	tr := newTransport()
+	dial, calls := rawDialer(t, addr)
+
+	maxAge := 100 * time.Millisecond
+	pool := NewConnPool(tr, 2, maxAge, dial)
+
+	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+
+	// Warm: dial 2 conns.
+	for i := 0; i < 2; i++ {
+		cc, err := pool.GetClientConn(req, addr)
+		if err != nil {
+			t.Fatalf("warmup[%d]: %v", i, err)
+		}
+		cc.RoundTrip(req)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("warmup dials = %d, want 2", got)
+	}
+
+	// Wait past maxAge so existing conns are due for recycling.
+	time.Sleep(maxAge + 50*time.Millisecond)
+
+	// Next 2 calls should trigger fresh dials (old conns retired async).
+	for i := 0; i < 2; i++ {
+		cc, err := pool.GetClientConn(req, addr)
+		if err != nil {
+			t.Fatalf("post-age[%d]: %v", i, err)
+		}
+		cc.RoundTrip(req)
+	}
+	if got := calls.Load(); got != 4 {
+		t.Errorf("dials after maxAge = %d, want 4", got)
 	}
 }

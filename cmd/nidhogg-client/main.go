@@ -10,6 +10,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -40,6 +41,9 @@ func main() {
 	// pprof on loopback for production heap/goroutine profiling.
 	// Bound to 127.0.0.1 so no auth needed; ssh-tunnel from the operator
 	// box to access (`ssh -L 6061:localhost:6061 client-host`).
+	// Block + mutex profiles enabled for diagnosing latency regressions.
+	runtime.SetBlockProfileRate(1)
+	runtime.SetMutexProfileFraction(1)
 	go func() {
 		const addr = "127.0.0.1:6061"
 		slog.Info("starting pprof", "addr", addr)
@@ -49,7 +53,7 @@ func main() {
 	}()
 
 	shapingMode, _ := shaper.ParseMode(cfg.ShapingMode) // already validated in LoadConfig
-	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint, shapingMode, cfg.ConnectionPoolSize, cfg.IdleTimeoutDuration())
+	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), cfg.Insecure, cfg.Fingerprint, shapingMode, cfg.ConnectionPoolSize, cfg.IdleTimeoutDuration(), cfg.ConnectionMaxAgeDuration())
 
 	healthCfg := health.Config{
 		MaxHandshakeRTT:     time.Duration(cfg.MaxRTTMs) * time.Millisecond,

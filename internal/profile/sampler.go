@@ -24,6 +24,31 @@ func (p *Profile) SampleTiming() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// SamplePercentile returns the Value at percentile p (0..1) using linear
+// interpolation between adjacent CDF points. Used for diagnostic logging
+// to compare profile distributions over time.
+func SamplePercentile(cdf []CDFPoint, p float64) float64 {
+	if len(cdf) == 0 {
+		return 0
+	}
+	if p <= cdf[0].Percentile {
+		return cdf[0].Value
+	}
+	if p >= cdf[len(cdf)-1].Percentile {
+		return cdf[len(cdf)-1].Value
+	}
+	idx := sort.Search(len(cdf), func(i int) bool {
+		return cdf[i].Percentile >= p
+	})
+	lo := cdf[idx-1]
+	hi := cdf[idx]
+	if hi.Percentile == lo.Percentile {
+		return lo.Value
+	}
+	t := (p - lo.Percentile) / (hi.Percentile - lo.Percentile)
+	return lo.Value + t*(hi.Value-lo.Value)
+}
+
 // sampleCDF picks a random value from a CDF using binary search + linear interpolation.
 func sampleCDF(cdf []CDFPoint) float64 {
 	if len(cdf) == 0 {

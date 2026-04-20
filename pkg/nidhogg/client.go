@@ -32,6 +32,12 @@ type ClientConfig struct {
 	// peers. Default: 5 minutes (when zero). Set to a negative value
 	// to disable (not recommended for long-running clients).
 	IdleTimeout time.Duration
+	// ConnectionMaxAge retires pooled HTTP/2 connections older than that
+	// and gracefully redials replacements. Prevents gradual latency
+	// degradation from accumulated h2 internal state and stale TCP paths
+	// on long-lived connections. Default: 1 hour (when zero). Negative
+	// disables recycling.
+	ConnectionMaxAge time.Duration
 }
 
 // Client creates tunnel connections to a nidhogg server.
@@ -59,6 +65,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.IdleTimeout == 0 {
 		cfg.IdleTimeout = 5 * time.Minute
 	}
+	if cfg.ConnectionMaxAge == 0 {
+		cfg.ConnectionMaxAge = time.Hour
+	}
 
 	d := client.NewDialer(
 		cfg.Server,
@@ -69,6 +78,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		toInternalMode(cfg.ShapingMode),
 		cfg.ConnectionPoolSize,
 		cfg.IdleTimeout,
+		cfg.ConnectionMaxAge,
 	)
 	return &Client{dialer: d}, nil
 }

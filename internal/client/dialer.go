@@ -44,7 +44,10 @@ type Dialer struct {
 // idleTimeout closes a tunnel conn after that long without Read/Write
 // activity. Zero disables the idle timer (use with care; tunnels stuck on
 // silent peers will leak goroutines + h2 stream buffers indefinitely).
-func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int, idleTimeout time.Duration) *Dialer {
+// connMaxAge retires pooled HTTP/2 connections older than that and
+// gracefully redials replacements, preventing slow accumulation of
+// internal h2 state and stale TCP path issues. Zero disables recycling.
+func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int, idleTimeout, connMaxAge time.Duration) *Dialer {
 	helloID, _ := transport.FingerprintID(fingerprint) // validated in config
 
 	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -78,7 +81,7 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 	}
 
 	if poolSize > 1 {
-		h2transport.ConnPool = NewConnPool(h2transport, poolSize, dialTLS)
+		h2transport.ConnPool = NewConnPool(h2transport, poolSize, connMaxAge, dialTLS)
 	}
 
 	serverURL := "https://" + server + tunnelPath

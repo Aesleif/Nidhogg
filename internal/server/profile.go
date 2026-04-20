@@ -141,7 +141,10 @@ func (pm *ProfileManager) bootstrap() {
 	slog.Info("profile: bootstrap complete",
 		"name", prof.Name,
 		"send_cdf_points", len(prof.SendSizeCDF),
-		"avg_burst", prof.AvgBurstLen)
+		"avg_burst", prof.AvgBurstLen,
+		"send_p50", int(profile.SamplePercentile(prof.SendSizeCDF, 0.5)),
+		"send_p95", int(profile.SamplePercentile(prof.SendSizeCDF, 0.95)),
+		"send_p99", int(profile.SamplePercentile(prof.SendSizeCDF, 0.99)))
 }
 
 func (pm *ProfileManager) regenerate(trigger string) {
@@ -175,5 +178,8 @@ func (pm *ProfileManager) regenerate(trigger string) {
 		"snapshots", len(snaps),
 		"name", prof.Name,
 		"send_cdf_points", len(prof.SendSizeCDF),
-		"avg_burst", prof.AvgBurstLen)
+		"avg_burst", prof.AvgBurstLen,
+		"send_p50", int(profile.SamplePercentile(prof.SendSizeCDF, 0.5)),
+		"send_p95", int(profile.SamplePercentile(prof.SendSizeCDF, 0.95)),
+		"send_p99", int(profile.SamplePercentile(prof.SendSizeCDF, 0.99)))
 }
