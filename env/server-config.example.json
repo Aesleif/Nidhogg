@@ -2,7 +2,7 @@
   "listen": ":8443",
   "domain": "shop.example.com",
   "psk": "secret-key",
-  "proxy_to": "https://google.com",
+  "cover_upstream": "www.microsoft.com:443",
   "tunnel_path": "/",
   "cert_file": "./env/cert.pem",
   "key_file": "./env/key.pem",

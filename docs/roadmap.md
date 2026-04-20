@@ -41,6 +41,16 @@ are roughly ordered by priority.
 - Reverse-proxy upstream transport with explicit `IdleConnTimeout` and
   bounded idle pool
 
+### Active probing
+- **Phase 1: SNI router** — standalone server peeks TLS ClientHello,
+  raw-TCP-forwards mismatched-SNI connections to a configured
+  `cover_upstream` (real HTTPS site). Probers using arbitrary SNIs
+  (`google.com`, etc.) see that site's real cert and handshake
+  byte-for-byte
+- **`cover_upstream` doubles as HTTP-fallback target** — invalid-PSK
+  requests on the matching domain are reverse-proxied to the same site,
+  giving probers a probe-consistent picture across vectors
+
 ### Observability
 - `net/http/pprof` endpoints on loopback (`:6060` server, `:6061` client)
 - Block + mutex profiles enabled by default (full sampling rate)
@@ -51,19 +61,22 @@ are roughly ordered by priority.
 
 ## Next up
 
-### Active probing hardening (highest priority)
+### Active probing hardening — Phase 2 (highest priority)
 
-Currently a determined active prober can fingerprint the server as "Go's
-`crypto/tls`, not nginx/cloudflare". VLESS-Reality solves this by SNI-muxing
-the TLS handshake to a real upstream site so ServerHello is byte-identical
-to the legitimate origin.
+Phase 1 (SNI router with raw-TCP forward to a cover upstream) is done
+and protects against IP-range scanners using arbitrary SNIs. Probes
+that target our specific domain still hit the regular nidhogg path:
+they see Go's `crypto/tls` ServerHello (cipher and extension order
+distinguishable from nginx/cloudflare) and our Let's Encrypt cert.
 
-- [ ] Replace reverse-proxy fallback with **transparent SNI mux** to a
-  configured real upstream
-- [ ] On bad PSK: forward the entire TLS connection (not the decrypted
-  HTTP request) to the upstream so handshakes match the real site
-- [ ] Document the upstream-selection trade-offs (cover site availability,
-  latency, bandwidth amplification risk)
+- [ ] **Reality-style cert mux** — embed a PSK signature in the
+  ClientHello (e.g., session ticket field) so the server can decide
+  pre-handshake whether to terminate TLS locally or proxy the entire
+  TLS handshake (raw bytes) to the cover upstream
+- [ ] **Server-side TLS fingerprint masking** — match nginx/Cloudflare
+  cipher and extension order so JA3S of our ServerHello blends in
+- [ ] Document the upstream-selection trade-offs (cover site
+  availability, latency, bandwidth amplification risk)
 
 ### Multi-PSK / per-user authentication
 

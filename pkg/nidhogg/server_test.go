@@ -14,12 +14,12 @@ func TestNewServerValidation(t *testing.T) {
 
 	_, err = nidhogg.NewServer(nidhogg.ServerConfig{PSK: "secret"})
 	if err == nil {
-		t.Fatal("expected error for missing ProxyTo")
+		t.Fatal("expected error for missing CoverUpstream")
 	}
 
 	srv, err := nidhogg.NewServer(nidhogg.ServerConfig{
-		PSK:     "secret",
-		ProxyTo: "https://example.com",
+		PSK:           "secret",
+		CoverUpstream: "www.microsoft.com:443",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -33,8 +33,8 @@ func TestNewServerValidation(t *testing.T) {
 
 func TestNewServerDefaults(t *testing.T) {
 	srv, err := nidhogg.NewServer(nidhogg.ServerConfig{
-		PSK:     "secret",
-		ProxyTo: "https://example.com",
+		PSK:           "secret",
+		CoverUpstream: "www.microsoft.com:443",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -46,12 +46,13 @@ func TestNewServerDefaults(t *testing.T) {
 	}
 }
 
-func TestNewServerInvalidProxyTo(t *testing.T) {
+func TestNewServerInvalidCoverUpstream(t *testing.T) {
+	// Missing :port — net.SplitHostPort rejects.
 	_, err := nidhogg.NewServer(nidhogg.ServerConfig{
-		PSK:     "secret",
-		ProxyTo: "://invalid",
+		PSK:           "secret",
+		CoverUpstream: "no-port-here",
 	})
 	if err == nil {
-		t.Fatal("expected error for invalid ProxyTo URL")
+		t.Fatal("expected error for CoverUpstream without :port")
 	}
 }

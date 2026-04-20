@@ -20,8 +20,11 @@ import (
 type ServerConfig struct {
 	// PSK is the pre-shared key for tunnel authentication. Required.
 	PSK string
-	// ProxyTo is the reverse proxy fallback URL for non-tunnel requests. Required.
-	ProxyTo string
+	// CoverUpstream is the host:port of a real HTTPS site used as the
+	// PSK-fallback HTTP reverse-proxy target (and, when paired with the
+	// SNI router in the standalone server binary, the raw-TCP forward
+	// target for non-matching SNIs). Required for NewServer.
+	CoverUpstream string
 	// TunnelPath is the HTTP path for the tunnel endpoint. Default: "/".
 	TunnelPath string
 	// ProfileTargets are hosts used for traffic profile generation. Default: ["google.com"].
@@ -91,8 +94,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.PSK == "" {
 		return nil, fmt.Errorf("nidhogg: PSK is required")
 	}
-	if cfg.ProxyTo == "" {
-		return nil, fmt.Errorf("nidhogg: proxy_to is required")
+	if cfg.CoverUpstream == "" {
+		return nil, fmt.Errorf("nidhogg: cover_upstream is required")
 	}
 	if cfg.TunnelPath == "" {
 		cfg.TunnelPath = "/"
@@ -115,7 +118,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileInterval, cfg.ProfileMinSnapshots)
 	agg := telemetry.NewAggregator(pm, cfg.TelemetryCriticalThreshold)
 
-	proxy, err := server.NewReverseProxy(cfg.ProxyTo)
+	proxy, err := server.NewReverseProxy(cfg.CoverUpstream)
 	if err != nil {
 		return nil, fmt.Errorf("nidhogg: %w", err)
 	}

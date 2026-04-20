@@ -21,7 +21,7 @@ func TestLoadConfig_Full(t *testing.T) {
 		"listen": ":8443",
 		"domain": "shop.example.com",
 		"psk": "secret-key",
-		"proxy_to": "https://real-shop.com",
+		"cover_upstream": "real-shop.com:443",
 		"tunnel_path": "/upload",
 		"cert_file": "cert.pem",
 		"key_file": "key.pem"
@@ -41,8 +41,8 @@ func TestLoadConfig_Full(t *testing.T) {
 	if cfg.PSK != "secret-key" {
 		t.Errorf("PSK = %q, want %q", cfg.PSK, "secret-key")
 	}
-	if cfg.ProxyTo != "https://real-shop.com" {
-		t.Errorf("ProxyTo = %q, want %q", cfg.ProxyTo, "https://real-shop.com")
+	if cfg.CoverUpstream != "real-shop.com:443" {
+		t.Errorf("CoverUpstream = %q, want %q", cfg.CoverUpstream, "real-shop.com:443")
 	}
 	if cfg.TunnelPath != "/upload" {
 		t.Errorf("TunnelPath = %q, want %q", cfg.TunnelPath, "/upload")
@@ -59,7 +59,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"domain": "example.com",
 		"psk": "key",
-		"proxy_to": "https://example.com"
+		"cover_upstream": "www.microsoft.com:443"
 	}`)
 
 	cfg, err := LoadConfig(path)
@@ -78,7 +78,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 func TestLoadConfig_MissingPSK(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"domain": "example.com",
-		"proxy_to": "https://example.com"
+		"cover_upstream": "www.microsoft.com:443"
 	}`)
 
 	_, err := LoadConfig(path)
@@ -87,7 +87,7 @@ func TestLoadConfig_MissingPSK(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_MissingProxyTo(t *testing.T) {
+func TestLoadConfig_MissingCoverUpstream(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"domain": "example.com",
 		"psk": "key"
@@ -95,14 +95,14 @@ func TestLoadConfig_MissingProxyTo(t *testing.T) {
 
 	_, err := LoadConfig(path)
 	if err == nil {
-		t.Fatal("expected error for missing proxy_to")
+		t.Fatal("expected error for missing cover_upstream")
 	}
 }
 
 func TestLoadConfig_MissingDomainWithoutCert(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"psk": "key",
-		"proxy_to": "https://example.com"
+		"cover_upstream": "www.microsoft.com:443"
 	}`)
 
 	_, err := LoadConfig(path)
@@ -114,7 +114,7 @@ func TestLoadConfig_MissingDomainWithoutCert(t *testing.T) {
 func TestLoadConfig_CertWithoutKey(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"psk": "key",
-		"proxy_to": "https://example.com",
+		"cover_upstream": "www.microsoft.com:443",
 		"cert_file": "cert.pem"
 	}`)
 
@@ -127,7 +127,7 @@ func TestLoadConfig_CertWithoutKey(t *testing.T) {
 func TestLoadConfig_CertFileAllowsMissingDomain(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"psk": "key",
-		"proxy_to": "https://example.com",
+		"cover_upstream": "www.microsoft.com:443",
 		"cert_file": "cert.pem",
 		"key_file": "key.pem"
 	}`)

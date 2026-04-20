@@ -13,7 +13,7 @@ type Config struct {
 	Listen                     string   `json:"listen"`
 	Domain                     string   `json:"domain"`
 	PSK                        string   `json:"psk"`
-	ProxyTo                    string   `json:"proxy_to"`
+	CoverUpstream              string   `json:"cover_upstream"` // host:port; doubles as raw-TCP forward target for non-matching SNI and HTTP fallback for invalid PSK
 	TunnelPath                 string   `json:"tunnel_path"`
 	CertFile                   string   `json:"cert_file,omitempty"`
 	KeyFile                    string   `json:"key_file,omitempty"`
@@ -57,8 +57,8 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.PSK == "" {
 		return nil, fmt.Errorf("psk is required")
 	}
-	if cfg.ProxyTo == "" {
-		return nil, fmt.Errorf("proxy_to is required")
+	if cfg.CoverUpstream == "" {
+		return nil, fmt.Errorf("cover_upstream is required (host:port of a real HTTPS site to mimic)")
 	}
 	if cfg.Domain == "" && cfg.CertFile == "" {
 		return nil, fmt.Errorf("domain is required when cert_file is not set (needed for Let's Encrypt)")

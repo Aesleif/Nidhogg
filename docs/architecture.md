@@ -232,6 +232,51 @@ problems that surface only after long uptime:
    streams, freeing those goroutines and the h2 scratch buffers each
    was holding.
 
+## SNI router (active probing protection — Phase 1)
+
+The standalone server listens on raw TCP, not on a TLS-terminating
+`http.Server`. For each accepted connection, `internal/server/snirouter.go`
+peeks the first TLS record (the ClientHello), parses out the SNI and
+ALPN extensions via `internal/transport/sni.go:PeekSNI`, then dispatches:
+
+```
+TCP :443 listener
+  |
+  v  peek ClientHello (TLS record header → full record)
+  |
+  +-- SNI == config.domain  -> tls.Server with our cert → http.Server (PSK or HTTP fallback)
+  +-- ALPN includes "acme-tls/1"  -> same TLS path; autocert handles the challenge
+  +-- otherwise              -> raw-TCP forward to config.cover_upstream
+```
+
+**Why**: censorship scanners walk IP ranges with arbitrary SNIs
+(`google.com`, `cloudflare.com`, ...). With a plain TLS terminator our
+server returns its Let's Encrypt cert for those probes, which is a
+trivial telltale that we're not the site we're pretending to be at that
+SNI. With raw-TCP forward to a cover site, the prober sees that site's
+real cert and a valid TLS handshake byte-for-byte.
+
+**`cover_upstream` is dual-purpose** (`host:port` format):
+- Pre-TLS: raw forward target for SNI mismatch (this section)
+- Post-TLS: HTTP reverse proxy target for invalid-PSK requests
+  (existing fallback, see `internal/server/proxy.go`)
+
+This gives a probe-consistent picture: from any vector — random SNI
+scan, HTTP probe to our domain — the server returns content for the
+same cover site.
+
+**Limitation (Phase 2 territory)**: probes that already know our
+specific domain still hit the nidhogg path, get our LE cert and Go's
+TLS server fingerprint (cipher and extension order distinguishable
+from nginx). Closing this gap requires a Reality-style cert-mux or
+server-side uTLS fingerprint masking — separate work.
+
+`internal/transport/peekconn.go` provides the buffered-rewind wrapper
+so the peeked bytes remain readable when the conn is handed to
+`tls.Server`. `internal/server/snirouter.go:SingleConnListener` adapts a
+single accepted conn into a `net.Listener` so it can feed
+`http.Server.Serve`.
+
 ## Tunnel idle timeout
 
 `internal/transport/idle.go` provides `IdleConn`, a `net.Conn` wrapper

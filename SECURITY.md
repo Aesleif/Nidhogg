@@ -25,6 +25,7 @@ If you discover a security vulnerability, please report it responsibly:
 - **TLS client fingerprinting:** uTLS randomizes ClientHello to match real browsers (Chrome, Firefox, Safari)
 - **Unauthorized tunnel access:** PSK authentication via HMAC-SHA256 (57-byte handshake marker including version, timestamp, random nonce, MAC)
 - **Replay attacks (within bounds):** Nonce ring with timestamp window (±60s clock skew). Hard-capped at 10K entries to prevent unbounded memory; see weaknesses below for the trade-off.
+- **IP-range scanners with arbitrary SNIs (partial):** The standalone server peeks every TLS ClientHello and raw-TCP-forwards connections whose SNI doesn't match `cover_upstream`'s configured domain to a real HTTPS site. Probes targeting `google.com`, `cloudflare.com`, etc. on our IP get that site's actual certificate and TLS handshake. Targeted probes that use our specific domain bypass this — they still hit the regular nidhogg path (see weaknesses below).
 
 ### What Nidhogg does NOT protect against
 

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,7 +37,7 @@ func main() {
 	level, _ := logging.ParseLevel(cfg.LogLevel) // already validated
 	logging.Setup(level)
 
-	proxy, err := server.NewReverseProxy(cfg.ProxyTo)
+	proxy, err := server.NewReverseProxy(cfg.CoverUpstream)
 	if err != nil {
 		log.Fatalf("failed to create reverse proxy: %v", err)
 	}
@@ -136,10 +138,29 @@ func main() {
 
 	go pm.Start(ctx)
 
+	// SNI-router loop: peek every accepted TLS ClientHello and dispatch.
+	// SNI matching cfg.Domain → terminate TLS locally and serve nidhogg.
+	// Anything else → raw-TCP forward to cfg.CoverUpstream so probers
+	// see that real site's cert and TLS handshake byte-for-byte.
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		log.Fatalf("listen %s: %v", cfg.Listen, err)
+	}
+	router := &server.SNIRouter{
+		OurDomain:     cfg.Domain,
+		CoverUpstream: cfg.CoverUpstream,
+		NidhoggHandler: func(c net.Conn) {
+			// Hand the (already-peeked) conn to http.Server through a
+			// one-shot listener. http.Server completes TLS via tlsCfg.
+			tlsConn := tls.Server(c, tlsCfg)
+			singleLn := server.NewSingleConnListener(tlsConn)
+			_ = srv.Serve(singleLn)
+		},
+	}
 	go func() {
-		slog.Info("starting server", "listen", cfg.Listen, "domain", cfg.Domain, "tunnel", cfg.TunnelPath)
-		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+		slog.Info("starting server", "listen", cfg.Listen, "domain", cfg.Domain, "tunnel", cfg.TunnelPath, "cover_upstream", cfg.CoverUpstream)
+		if err := router.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Fatalf("router error: %v", err)
 		}
 	}()
 
@@ -149,6 +170,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	_ = ln.Close() // stop accepting new conns
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("shutdown error: %v", err)
 	}

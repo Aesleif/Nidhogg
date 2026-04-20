@@ -74,7 +74,7 @@ Create `config.json`:
   "listen": ":443",
   "domain": "your-domain.com",
   "psk": "your-secret-key",
-  "proxy_to": "https://example.com",
+  "cover_upstream": "www.microsoft.com:443",
   "profile_targets": ["google.com"],
   "log_level": "info"
 }
@@ -85,6 +85,13 @@ Create `config.json`:
 ```
 
 The server obtains a TLS certificate via Let's Encrypt automatically. For manual certificates, set `cert_file` and `key_file`.
+
+The `cover_upstream` setting is dual-purpose: connections whose TLS SNI
+doesn't match `domain` are raw-TCP-forwarded to the cover site (probers
+see that site's real cert and TLS handshake byte-for-byte), and HTTP
+requests on the matching domain that fail PSK validation are reverse-
+proxied to the same site. Pick a stable, unrelated HTTPS site
+(`www.microsoft.com:443`, `cdn.cloudflare.com:443`, etc.).
 
 ### Client setup
 
@@ -115,7 +122,7 @@ Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | `listen` | string | `":443"` | Listen address |
 | `domain` | string | required* | Domain for Let's Encrypt |
 | `psk` | string | required | Pre-shared key for tunnel authentication |
-| `proxy_to` | string | required | Reverse proxy target URL |
+| `cover_upstream` | string | required | Real HTTPS site as `host:port`. Used as raw-TCP forward target for non-matching SNIs (defeats IP-range scanners) and as HTTP fallback target when PSK validation fails |
 | `tunnel_path` | string | `"/"` | HTTP path for tunnel endpoint |
 | `cert_file` | string | | TLS certificate file (alternative to Let's Encrypt) |
 | `key_file` | string | | TLS private key file |
