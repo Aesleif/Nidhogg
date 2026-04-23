@@ -1,7 +1,7 @@
 {
   "listen": ":8443",
   "domain": "shop.example.com",
-  "psk": "secret-key",
+  "authorized_keys": [ "public-key-base64-encoded-ed25519-key-here" ],
   "cover_upstream": "www.microsoft.com:443",
   "tunnel_path": "/",
   "cert_file": "./env/cert.pem",

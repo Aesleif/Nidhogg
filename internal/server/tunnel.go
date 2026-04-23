@@ -22,35 +22,62 @@ import (
 
 const minSamplesForSnapshot = 10
 
-// TunnelHandler creates an http.Handler that handles tunnel connections.
-// If the PSK in the request body matches, the connection is tunneled
-// to the destination specified by the client. Otherwise, the request
-// is forwarded to the fallback handler (reverse proxy).
-// The caller owns the validator's lifecycle — typically starts
-// validator.StartCleanupLoop on server ctx so stale nonces don't
-// accumulate during idle periods.
+// TunnelHandler creates an http.Handler that runs the Ed25519
+// challenge-response handshake and tunnels authenticated clients.
+// Unknown clients (bad version byte, unauthorized pubkey) are forwarded
+// to the fallback handler (reverse proxy to the cover site) so probes
+// see only cover-site traffic.
 // acl screens client-supplied destinations before dial; production
 // passes DefaultDestACL{} to block loopback/private/CGNAT/link-local/
 // multicast ranges. Tests pass NopDestChecker{}.
-func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, acl DestChecker, fallback http.Handler, pm *ProfileManager, agg *telemetry.Aggregator) http.Handler {
+func TunnelHandler(auth *transport.AuthStore, acl DestChecker, fallback http.Handler, pm *ProfileManager, agg *telemetry.Aggregator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			fallback.ServeHTTP(w, r)
 			return
 		}
 
-		handshakeBuf := make([]byte, transport.HandshakeSize)
-		if _, err := io.ReadFull(r.Body, handshakeBuf); err != nil {
+		// 1. Client hello: [version:1][pubkey:32].
+		helloBuf := make([]byte, transport.HelloSize)
+		if _, err := io.ReadFull(r.Body, helloBuf); err != nil {
 			fallback.ServeHTTP(w, r)
 			return
 		}
-		if ok, err := validator.Validate(handshakeBuf); !ok {
-			slog.Debug("tunnel: handshake rejected", "err", err)
+		pub, err := transport.ParseHello(helloBuf)
+		if err != nil || !auth.Has(pub) {
 			fallback.ServeHTTP(w, r)
 			return
 		}
 
-		// PSK matched — read binary destination header
+		// 2. We've committed to the protocol. Issue challenge and
+		//    verify the client's signature before reading anything else.
+		flusher, flusherOK := w.(http.Flusher)
+		if !flusherOK {
+			slog.Error("tunnel: ResponseWriter does not support Flusher")
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		nonce, err := transport.GenerateNonce()
+		if err != nil {
+			return
+		}
+		if _, err := w.Write(nonce[:]); err != nil {
+			return
+		}
+		flusher.Flush()
+
+		sigBuf := make([]byte, transport.SignatureSize)
+		if _, err := io.ReadFull(r.Body, sigBuf); err != nil {
+			return
+		}
+		if !transport.VerifyChallenge(pub, nonce, sigBuf) {
+			slog.Debug("tunnel: bad signature", "client", auth.Name(pub))
+			return
+		}
+
+		// 3. Authenticated — read binary destination header.
 		reader := bufio.NewReader(r.Body)
 		d, err := transport.ReadDest(reader)
 		if err != nil {
@@ -79,7 +106,7 @@ func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, acl Dest
 		clientShaping := shaper.DecodeMode(shapingBuf[0]) != shaper.Disabled
 
 		if d.Command == transport.CommandTelemetry {
-			handleTelemetry(w, reader, pm, agg, clientVersion)
+			handleTelemetry(w, flusher, reader, pm, agg, clientVersion)
 			return
 		}
 
@@ -126,19 +153,8 @@ func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, acl Dest
 			}
 		}
 
-		// Start streaming response
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			slog.Error("tunnel: ResponseWriter does not support Flusher")
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher.Flush()
-
-		// Send profile inline: [version:4B] [size:4B] [json]
-		// If client already has this version, skip JSON payload.
+		// Response headers + challenge nonce were already sent above.
+		// Continue streaming the inline profile: [version:4B] [size:4B] [json?].
 		activeProfile, _ := writeProfileResponse(w, pm, clientVersion)
 		flusher.Flush()
 
@@ -297,11 +313,14 @@ func writeProfileResponse(w io.Writer, pm *ProfileManager, clientVersion uint32)
 	return activeProfile, version
 }
 
-func handleTelemetry(w http.ResponseWriter, reader io.Reader, pm *ProfileManager, agg *telemetry.Aggregator, clientVersion uint32) {
+// handleTelemetry is invoked after the full challenge-response, so the
+// response headers and the authentication nonce have already been sent.
+// It just reads the client's JSON report, forwards it to the aggregator,
+// and appends the inline profile payload.
+func handleTelemetry(w http.ResponseWriter, flusher http.Flusher, reader io.Reader, pm *ProfileManager, agg *telemetry.Aggregator, clientVersion uint32) {
 	var report telemetry.Report
 	if err := json.NewDecoder(reader).Decode(&report); err != nil {
 		slog.Warn("tunnel: invalid telemetry", "err", err)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
@@ -310,15 +329,6 @@ func handleTelemetry(w http.ResponseWriter, reader io.Reader, pm *ProfileManager
 	if agg != nil {
 		agg.Record(report)
 	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.WriteHeader(http.StatusOK)
 
 	writeProfileResponse(w, pm, clientVersion)
 	flusher.Flush()

@@ -34,7 +34,7 @@ func NewReverseProxy(coverUpstream string) (*httputil.ReverseProxy, error) {
 	// Own Transport with explicit timeouts and bounded idle pool.
 	// Default http.DefaultTransport keeps idle conns 90s and is shared
 	// process-wide; here every bogus probe / scanner request hitting the
-	// PSK fallback would forward to the cover site and accumulate idle
+	// auth fallback would forward to the cover site and accumulate idle
 	// conns.
 	proxy.Transport = &http.Transport{
 		DialContext: (&net.Dialer{

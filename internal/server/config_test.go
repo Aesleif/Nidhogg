@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,11 +19,23 @@ func writeTestConfig(t *testing.T, content string) string {
 	return path
 }
 
+// samplePubKeyB64 returns a valid base64-encoded Ed25519 public key so
+// tests can populate authorized_keys without computing one by hand.
+func samplePubKeyB64(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(pub)
+}
+
 func TestLoadConfig_Full(t *testing.T) {
+	pubB64 := samplePubKeyB64(t)
 	path := writeTestConfig(t, `{
 		"listen": ":8443",
 		"domain": "shop.example.com",
-		"psk": "secret-key",
+		"authorized_keys": ["`+pubB64+` alice"],
 		"cover_upstream": "real-shop.com:443",
 		"tunnel_path": "/upload",
 		"cert_file": "cert.pem",
@@ -38,8 +53,15 @@ func TestLoadConfig_Full(t *testing.T) {
 	if cfg.Domain != "shop.example.com" {
 		t.Errorf("Domain = %q, want %q", cfg.Domain, "shop.example.com")
 	}
-	if cfg.PSK != "secret-key" {
-		t.Errorf("PSK = %q, want %q", cfg.PSK, "secret-key")
+	if len(cfg.AuthorizedKeys) != 1 {
+		t.Fatalf("AuthorizedKeys len = %d, want 1", len(cfg.AuthorizedKeys))
+	}
+	keys, names, err := cfg.ParsedAuthorizedKeys()
+	if err != nil {
+		t.Fatalf("ParsedAuthorizedKeys: %v", err)
+	}
+	if len(keys) != 1 || names[0] != "alice" {
+		t.Errorf("parsed keys = %d names[0]=%q, want 1 alice", len(keys), names[0])
 	}
 	if cfg.CoverUpstream != "real-shop.com:443" {
 		t.Errorf("CoverUpstream = %q, want %q", cfg.CoverUpstream, "real-shop.com:443")
@@ -56,9 +78,10 @@ func TestLoadConfig_Full(t *testing.T) {
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
+	pubB64 := samplePubKeyB64(t)
 	path := writeTestConfig(t, `{
 		"domain": "example.com",
-		"psk": "key",
+		"authorized_keys": ["`+pubB64+`"],
 		"cover_upstream": "www.microsoft.com:443"
 	}`)
 
@@ -75,7 +98,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_MissingPSK(t *testing.T) {
+func TestLoadConfig_MissingAuthorizedKeys(t *testing.T) {
 	path := writeTestConfig(t, `{
 		"domain": "example.com",
 		"cover_upstream": "www.microsoft.com:443"
@@ -83,14 +106,28 @@ func TestLoadConfig_MissingPSK(t *testing.T) {
 
 	_, err := LoadConfig(path)
 	if err == nil {
-		t.Fatal("expected error for missing PSK")
+		t.Fatal("expected error for missing authorized_keys")
+	}
+}
+
+func TestLoadConfig_InvalidAuthorizedKey(t *testing.T) {
+	path := writeTestConfig(t, `{
+		"domain": "example.com",
+		"authorized_keys": ["not-base64!!"],
+		"cover_upstream": "www.microsoft.com:443"
+	}`)
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for bad base64")
 	}
 }
 
 func TestLoadConfig_MissingCoverUpstream(t *testing.T) {
+	pubB64 := samplePubKeyB64(t)
 	path := writeTestConfig(t, `{
 		"domain": "example.com",
-		"psk": "key"
+		"authorized_keys": ["`+pubB64+`"]
 	}`)
 
 	_, err := LoadConfig(path)
@@ -100,8 +137,9 @@ func TestLoadConfig_MissingCoverUpstream(t *testing.T) {
 }
 
 func TestLoadConfig_MissingDomainWithoutCert(t *testing.T) {
+	pubB64 := samplePubKeyB64(t)
 	path := writeTestConfig(t, `{
-		"psk": "key",
+		"authorized_keys": ["`+pubB64+`"],
 		"cover_upstream": "www.microsoft.com:443"
 	}`)
 
@@ -112,8 +150,9 @@ func TestLoadConfig_MissingDomainWithoutCert(t *testing.T) {
 }
 
 func TestLoadConfig_CertWithoutKey(t *testing.T) {
+	pubB64 := samplePubKeyB64(t)
 	path := writeTestConfig(t, `{
-		"psk": "key",
+		"authorized_keys": ["`+pubB64+`"],
 		"cover_upstream": "www.microsoft.com:443",
 		"cert_file": "cert.pem"
 	}`)
@@ -125,8 +164,9 @@ func TestLoadConfig_CertWithoutKey(t *testing.T) {
 }
 
 func TestLoadConfig_CertFileAllowsMissingDomain(t *testing.T) {
+	pubB64 := samplePubKeyB64(t)
 	path := writeTestConfig(t, `{
-		"psk": "key",
+		"authorized_keys": ["`+pubB64+`"],
 		"cover_upstream": "www.microsoft.com:443",
 		"cert_file": "cert.pem",
 		"key_file": "key.pem"

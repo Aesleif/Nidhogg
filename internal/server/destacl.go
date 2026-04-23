@@ -19,7 +19,7 @@ type DestChecker interface {
 
 // DefaultDestACL denies destinations on well-known non-routable or
 // internal address ranges. It is safe-by-default with no configuration
-// knob — a PSK-authenticated client must not be able to proxy into the
+// knob — an authenticated client must not be able to proxy into the
 // server's own loopback or private network.
 type DefaultDestACL struct{}
 

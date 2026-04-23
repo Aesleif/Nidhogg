@@ -53,7 +53,11 @@ func main() {
 	}()
 
 	shapingMode, _ := shaper.ParseMode(cfg.ShapingMode) // already validated in LoadConfig
-	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, []byte(cfg.PSK), nil, cfg.Fingerprint, shapingMode, cfg.ConnectionPoolSize, cfg.IdleTimeoutDuration(), cfg.ConnectionMaxAgeDuration())
+	priv, err := cfg.PrivateKeyBytes()
+	if err != nil {
+		log.Fatalf("private_key: %v", err)
+	}
+	dialer := client.NewDialer(cfg.Server, cfg.TunnelPath, priv, nil, cfg.Fingerprint, shapingMode, cfg.ConnectionPoolSize, cfg.IdleTimeoutDuration(), cfg.ConnectionMaxAgeDuration())
 
 	healthCfg := health.Config{
 		MaxHandshakeRTT:     time.Duration(cfg.MaxRTTMs) * time.Millisecond,
@@ -128,7 +132,7 @@ func main() {
 		}),
 	)
 	sender := telemetry.NewSender(
-		dialer.ServerURL(), []byte(cfg.PSK), dialer.Client(),
+		dialer.ServerURL(), priv, dialer.Client(),
 		cfg.TelemetryIntervalDuration(), tracker, sw,
 	)
 	sender.OnProfile = func(p *profile.Profile) {

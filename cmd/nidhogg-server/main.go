@@ -43,9 +43,12 @@ func main() {
 		log.Fatalf("failed to create reverse proxy: %v", err)
 	}
 
-	psk := []byte(cfg.PSK)
-
-	validator := transport.NewValidator(psk)
+	authKeys, authNames, err := cfg.ParsedAuthorizedKeys()
+	if err != nil {
+		log.Fatalf("authorized_keys: %v", err)
+	}
+	auth := transport.NewAuthStore(authKeys, authNames)
+	slog.Info("authorized keys loaded", "count", auth.Size())
 
 	// Profile manager: generates traffic profiles from target sites
 	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileIntervalDuration(), cfg.ProfileMinSnapshots)
@@ -55,7 +58,7 @@ func main() {
 
 	// Tunnel handler on tunnel_path, everything else goes to reverse proxy
 	mux := http.NewServeMux()
-	tunnelHandler := server.TunnelHandler(psk, validator, server.DefaultDestACL{}, proxy, pm, agg)
+	tunnelHandler := server.TunnelHandler(auth, server.DefaultDestACL{}, proxy, pm, agg)
 	mux.Handle(cfg.TunnelPath, tunnelHandler)
 	if cfg.TunnelPath != "/" {
 		mux.Handle("/", proxy)
@@ -140,9 +143,6 @@ func main() {
 	defer stop()
 
 	go pm.Start(ctx)
-	// Sweep expired nonces every minute so idle periods don't retain
-	// stale entries up to the 10 000-nonce cap until the next handshake.
-	go validator.StartCleanupLoop(ctx, time.Minute)
 
 	// SNI-router loop: peek every accepted TLS ClientHello and dispatch.
 	// SNI matching cfg.Domain → terminate TLS locally and serve nidhogg.

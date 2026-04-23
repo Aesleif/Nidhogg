@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -28,7 +29,8 @@ import (
 // TLS connection via HTTP/2 streams.
 type Dialer struct {
 	serverURL       string
-	psk             []byte
+	priv            ed25519.PrivateKey
+	pub             ed25519.PublicKey
 	client          *http.Client
 	shapingMode     shaper.ShapingMode
 	idleTimeout     time.Duration
@@ -51,7 +53,10 @@ type Dialer struct {
 // internal h2 state and stale TCP path issues. Zero disables recycling.
 // rootCAs overrides the system trust anchors; nil uses system roots.
 // Tests supply their httptest server's cert pool here.
-func NewDialer(server, tunnelPath string, psk []byte, rootCAs *x509.CertPool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int, idleTimeout, connMaxAge time.Duration) *Dialer {
+// priv is the client's Ed25519 private key used for the challenge-response
+// handshake. Its corresponding public key must be in the server's
+// authorized_keys list.
+func NewDialer(server, tunnelPath string, priv ed25519.PrivateKey, rootCAs *x509.CertPool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int, idleTimeout, connMaxAge time.Duration) *Dialer {
 	helloID, _ := transport.FingerprintID(fingerprint) // validated in config
 
 	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -101,9 +106,11 @@ func NewDialer(server, tunnelPath string, psk []byte, rootCAs *x509.CertPool, fi
 
 	serverURL := "https://" + server + tunnelPath
 
+	pub, _ := priv.Public().(ed25519.PublicKey)
 	return &Dialer{
 		serverURL:   serverURL,
-		psk:         psk,
+		priv:        priv,
+		pub:         pub,
 		client:      &http.Client{Transport: h2transport},
 		shapingMode: shapingMode,
 		idleTimeout: idleTimeout,
@@ -114,39 +121,33 @@ func (d *Dialer) Client() *http.Client { return d.client }
 func (d *Dialer) ServerURL() string    { return d.serverURL }
 
 // DialTunnel opens a new tunnel stream to the given destination (host:port)
-// through the nidhogg server. The returned net.Conn represents the
-// bidirectional tunnel. handshakeRTT is the time from request to 200 OK.
+// through the nidhogg server. Runs the Ed25519 challenge-response
+// handshake inside the POST: the client sends its hello, reads the
+// server's random nonce from the response body, signs it, writes the
+// signature + destination + known profile version + shaping byte to the
+// request body, then proceeds to read the inline profile and start
+// relaying. handshakeRTT measures from request start to 200 OK.
 func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profile.Profile, time.Duration, error) {
-	// Build header synchronously: handshake + destination
-	var header bytes.Buffer
-	marker, err := transport.GenerateHandshake(d.psk)
-	if err != nil {
-		return nil, nil, 0, fmt.Errorf("generate handshake: %w", err)
-	}
-	header.Write(marker)
 	dd, err := transport.ParseDestination(dest)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("parse destination: %w", err)
 	}
-	if err := transport.WriteDest(&header, dd); err != nil {
-		return nil, nil, 0, fmt.Errorf("write destination: %w", err)
-	}
-	// Write known profile version so server can skip unchanged profiles
-	var knownVersionBuf [4]byte
-	binary.BigEndian.PutUint32(knownVersionBuf[:], d.profileVersion.Load())
-	header.Write(knownVersionBuf[:])
 
-	// Signal client's shaping mode so the server only wraps the relay
-	// in a ShapedConn when the client also will. Otherwise the framing
-	// would mismatch and corrupt all data.
-	header.WriteByte(shaper.EncodeMode(d.shapingMode))
+	hello := transport.MarshalHello(d.pub)
 
-	pr, pw := io.Pipe()
-	body := io.MultiReader(&header, pr)
+	// postAuth carries sig + destination + known profile version + shaping
+	// mode, written after the client has read the server nonce.
+	postAuthR, postAuthW := io.Pipe()
+	// relay carries caller-driven bytes after the handshake completes.
+	// It becomes the write side of the returned tunnelConn.
+	relayR, relayW := io.Pipe()
+
+	body := io.MultiReader(bytes.NewReader(hello), postAuthR, relayR)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.serverURL, body)
 	if err != nil {
-		pw.Close()
+		postAuthW.Close()
+		relayW.Close()
 		return nil, nil, 0, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -154,33 +155,74 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	dialStart := time.Now()
 	resp, err := d.client.Do(req)
 	if err != nil {
-		pw.Close()
+		postAuthW.Close()
+		relayW.Close()
 		return nil, nil, 0, fmt.Errorf("request failed: %w", err)
 	}
 	handshakeRTT := time.Since(dialStart)
 
+	// On any failure from here down we need to tear down both pipes so
+	// the request body unblocks and the stream closes cleanly.
+	abort := func(err error) error {
+		postAuthW.CloseWithError(err)
+		relayW.CloseWithError(err)
+		resp.Body.Close()
+		return err
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		pw.Close()
-		resp.Body.Close()
-		return nil, nil, 0, fmt.Errorf("tunnel rejected (status %d): %s", resp.StatusCode, string(body))
+		return nil, nil, 0, abort(fmt.Errorf("tunnel rejected (status %d): %s", resp.StatusCode, string(body)))
+	}
+
+	// Read the server's 32-byte challenge nonce.
+	var nonce [transport.NonceSize]byte
+	if _, err := io.ReadFull(resp.Body, nonce[:]); err != nil {
+		return nil, nil, 0, abort(fmt.Errorf("read nonce: %w", err))
+	}
+
+	// Sign and send signature + destination + known profile version + shaping.
+	sig := transport.SignChallenge(d.priv, nonce)
+	if _, err := postAuthW.Write(sig); err != nil {
+		return nil, nil, 0, abort(fmt.Errorf("write signature: %w", err))
+	}
+	var destHeader bytes.Buffer
+	if err := transport.WriteDest(&destHeader, dd); err != nil {
+		return nil, nil, 0, abort(fmt.Errorf("write destination: %w", err))
+	}
+	var knownVersionBuf [4]byte
+	binary.BigEndian.PutUint32(knownVersionBuf[:], d.profileVersion.Load())
+	destHeader.Write(knownVersionBuf[:])
+	destHeader.WriteByte(shaper.EncodeMode(d.shapingMode))
+	if _, err := postAuthW.Write(destHeader.Bytes()); err != nil {
+		return nil, nil, 0, abort(fmt.Errorf("write dest header: %w", err))
+	}
+	// Post-auth segment done — MultiReader advances to the relay pipe.
+	if err := postAuthW.Close(); err != nil {
+		return nil, nil, 0, abort(fmt.Errorf("close post-auth writer: %w", err))
 	}
 
 	// Read inline profile: [version:4B] [size:4B] [json?]
 	var prof *profile.Profile
 	var versionBuf [4]byte
 	if _, err := io.ReadFull(resp.Body, versionBuf[:]); err != nil {
-		pw.Close()
+		relayW.CloseWithError(err)
 		resp.Body.Close()
 		return nil, nil, 0, fmt.Errorf("read profile version: %w", err)
 	}
 	serverVersion := binary.BigEndian.Uint32(versionBuf[:])
 
+	// abortProfile tears down the relay pipe and resp.Body on errors
+	// after the handshake completed but the profile payload went bad.
+	abortProfile := func(err error) error {
+		relayW.CloseWithError(err)
+		resp.Body.Close()
+		return err
+	}
+
 	var sizeBuf [4]byte
 	if _, err := io.ReadFull(resp.Body, sizeBuf[:]); err != nil {
-		pw.Close()
-		resp.Body.Close()
-		return nil, nil, 0, fmt.Errorf("read profile size: %w", err)
+		return nil, nil, 0, abortProfile(fmt.Errorf("read profile size: %w", err))
 	}
 	profSize := binary.BigEndian.Uint32(sizeBuf[:])
 	// Sanity bound: real profiles are ~10–50 KB of JSON. A garbage value
@@ -189,22 +231,16 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	// a huge allocation. 1 MiB is well above the legitimate maximum.
 	const maxProfileSize = 1 << 20
 	if profSize > maxProfileSize {
-		pw.Close()
-		resp.Body.Close()
-		return nil, nil, 0, fmt.Errorf("profile size out of range: %d", profSize)
+		return nil, nil, 0, abortProfile(fmt.Errorf("profile size out of range: %d", profSize))
 	}
 	if profSize > 0 {
 		profJSON := make([]byte, profSize)
 		if _, err := io.ReadFull(resp.Body, profJSON); err != nil {
-			pw.Close()
-			resp.Body.Close()
-			return nil, nil, 0, fmt.Errorf("read profile data: %w", err)
+			return nil, nil, 0, abortProfile(fmt.Errorf("read profile data: %w", err))
 		}
 		prof = &profile.Profile{}
 		if err := json.Unmarshal(profJSON, prof); err != nil {
-			pw.Close()
-			resp.Body.Close()
-			return nil, nil, 0, fmt.Errorf("parse profile: %w", err)
+			return nil, nil, 0, abortProfile(fmt.Errorf("parse profile: %w", err))
 		}
 		prevVersion := d.profileVersion.Swap(serverVersion)
 		d.cachedProfile.Store(prof)
@@ -229,7 +265,7 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 
 	var conn net.Conn = &tunnelConn{
 		reader: resp.Body,
-		writer: pw,
+		writer: relayW,
 	}
 
 	// Bound the tunnel's lifetime when no traffic flows. h2 stream itself

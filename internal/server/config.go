@@ -1,19 +1,28 @@
 package server
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aesleif/nidhogg/internal/logging"
 )
 
 type Config struct {
-	Listen                     string   `json:"listen"`
-	Domain                     string   `json:"domain"`
-	PSK                        string   `json:"psk"`
-	CoverUpstream              string   `json:"cover_upstream"` // host:port; doubles as raw-TCP forward target for non-matching SNI and HTTP fallback for invalid PSK
+	Listen string `json:"listen"`
+	Domain string `json:"domain"`
+	// AuthorizedKeys is the list of Ed25519 public keys authorized to
+	// open tunnels. Each entry is base64(32-byte pubkey), optionally
+	// followed by a space and a human-readable label used only in
+	// server-side logging:
+	//   "<b64-pubkey>"
+	//   "<b64-pubkey> alice-laptop"
+	AuthorizedKeys             []string `json:"authorized_keys"`
+	CoverUpstream              string   `json:"cover_upstream"` // host:port; doubles as raw-TCP forward target for non-matching SNI and HTTP fallback for unknown clients
 	TunnelPath                 string   `json:"tunnel_path"`
 	CertFile                   string   `json:"cert_file,omitempty"`
 	KeyFile                    string   `json:"key_file,omitempty"`
@@ -22,6 +31,37 @@ type Config struct {
 	ProfileMinSnapshots        int      `json:"profile_min_snapshots"`
 	TelemetryCriticalThreshold int      `json:"telemetry_critical_threshold"`
 	LogLevel                   string   `json:"log_level"`
+}
+
+// ParsedAuthorizedKeys decodes AuthorizedKeys into (keys, names) slices.
+// Invalid entries are reported as errors; callers decide whether to
+// abort or warn. Names are parallel to keys ("" when no label given).
+func (c *Config) ParsedAuthorizedKeys() ([]ed25519.PublicKey, []string, error) {
+	keys := make([]ed25519.PublicKey, 0, len(c.AuthorizedKeys))
+	names := make([]string, 0, len(c.AuthorizedKeys))
+	for i, line := range c.AuthorizedKeys {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var encoded, name string
+		if idx := strings.IndexAny(line, " \t"); idx >= 0 {
+			encoded = line[:idx]
+			name = strings.TrimSpace(line[idx+1:])
+		} else {
+			encoded = line
+		}
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, nil, fmt.Errorf("authorized_keys[%d]: base64 decode: %w", i, err)
+		}
+		if len(raw) != ed25519.PublicKeySize {
+			return nil, nil, fmt.Errorf("authorized_keys[%d]: want %d bytes, got %d", i, ed25519.PublicKeySize, len(raw))
+		}
+		keys = append(keys, ed25519.PublicKey(raw))
+		names = append(names, name)
+	}
+	return keys, names, nil
 }
 
 // ProfileIntervalDuration parses ProfileInterval as a time.Duration.
@@ -54,8 +94,11 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.TunnelPath == "" {
 		cfg.TunnelPath = "/"
 	}
-	if cfg.PSK == "" {
-		return nil, fmt.Errorf("psk is required")
+	if len(cfg.AuthorizedKeys) == 0 {
+		return nil, fmt.Errorf("authorized_keys is required (at least one base64 Ed25519 pubkey)")
+	}
+	if _, _, err := cfg.ParsedAuthorizedKeys(); err != nil {
+		return nil, err
 	}
 	if cfg.CoverUpstream == "" {
 		return nil, fmt.Errorf("cover_upstream is required (host:port of a real HTTPS site to mimic)")

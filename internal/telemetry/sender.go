@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -26,7 +27,8 @@ type ProfileSource interface {
 
 type Sender struct {
 	serverURL      string
-	psk            []byte
+	priv           ed25519.PrivateKey
+	pub            ed25519.PublicKey
 	client         *http.Client
 	interval       time.Duration
 	tracker        TrackerSource
@@ -35,10 +37,12 @@ type Sender struct {
 	OnProfile      func(*profile.Profile)
 }
 
-func NewSender(serverURL string, psk []byte, client *http.Client, interval time.Duration, tracker TrackerSource, sw ProfileSource) *Sender {
+func NewSender(serverURL string, priv ed25519.PrivateKey, client *http.Client, interval time.Duration, tracker TrackerSource, sw ProfileSource) *Sender {
+	pub, _ := priv.Public().(ed25519.PublicKey)
 	return &Sender{
 		serverURL: serverURL,
-		psk:       psk,
+		priv:      priv,
+		pub:       pub,
 		client:    client,
 		interval:  interval,
 		tracker:   tracker,
@@ -78,38 +82,66 @@ func (s *Sender) Start(ctx context.Context) {
 	}
 }
 
+// send runs the Ed25519 challenge-response against the tunnel endpoint
+// and submits the telemetry report. The flow mirrors client.DialTunnel:
+// send hello, read nonce from response, write signature + destination
+// (Telemetry command) + version + shaping + JSON payload, then read
+// back the optional profile update.
 func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, error) {
-	// Build header synchronously
-	var header bytes.Buffer
-	marker, err := transport.GenerateHandshake(s.psk)
-	if err != nil {
-		return nil, fmt.Errorf("generate handshake: %w", err)
-	}
-	header.Write(marker)
-	if err := transport.WriteDest(&header, transport.Destination{Command: transport.CommandTelemetry}); err != nil {
-		return nil, fmt.Errorf("write destination: %w", err)
-	}
-	var knownVersionBuf [4]byte
-	binary.BigEndian.PutUint32(knownVersionBuf[:], s.profileVersion)
-	header.Write(knownVersionBuf[:])
-	header.WriteByte(0) // shaping disabled — telemetry path is not relayed
-	json.NewEncoder(&header).Encode(report)
+	hello := transport.MarshalHello(s.pub)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL, &header)
+	postAuthR, postAuthW := io.Pipe()
+	body := io.MultiReader(bytes.NewReader(hello), postAuthR)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverURL, body)
 	if err != nil {
+		postAuthW.Close()
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		postAuthW.Close()
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	abort := func(err error) error {
+		postAuthW.CloseWithError(err)
+		return err
 	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, abort(fmt.Errorf("server returned %d", resp.StatusCode))
+	}
+
+	var nonce [transport.NonceSize]byte
+	if _, err := io.ReadFull(resp.Body, nonce[:]); err != nil {
+		return nil, abort(fmt.Errorf("read nonce: %w", err))
+	}
+
+	sig := transport.SignChallenge(s.priv, nonce)
+	if _, err := postAuthW.Write(sig); err != nil {
+		return nil, abort(fmt.Errorf("write signature: %w", err))
+	}
+
+	var post bytes.Buffer
+	if err := transport.WriteDest(&post, transport.Destination{Command: transport.CommandTelemetry}); err != nil {
+		return nil, abort(fmt.Errorf("write destination: %w", err))
+	}
+	var knownVersionBuf [4]byte
+	binary.BigEndian.PutUint32(knownVersionBuf[:], s.profileVersion)
+	post.Write(knownVersionBuf[:])
+	post.WriteByte(0) // shaping disabled — telemetry path is not relayed
+	if err := json.NewEncoder(&post).Encode(report); err != nil {
+		return nil, abort(fmt.Errorf("encode report: %w", err))
+	}
+	if _, err := postAuthW.Write(post.Bytes()); err != nil {
+		return nil, abort(fmt.Errorf("write post-auth: %w", err))
+	}
+	// Request body is fully sent; let the server finish its response.
+	postAuthW.Close()
 
 	// Read profile response: [version:4B] [size:4B] [json?]
 	var versionBuf [4]byte
@@ -128,6 +160,10 @@ func (s *Sender) send(ctx context.Context, report Report) (*profile.Profile, err
 			s.profileVersion = serverVersion
 		}
 		return nil, nil
+	}
+	const maxProfileSize = 1 << 20
+	if profSize > maxProfileSize {
+		return nil, fmt.Errorf("profile size out of range: %d", profSize)
 	}
 
 	profJSON := make([]byte, profSize)

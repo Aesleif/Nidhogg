@@ -1,9 +1,8 @@
 {
   "server": "127.0.0.1:8443",
-  "psk": "secret-key",
+  "private_key": "ww5KO/jOWQ5HUzFSR53os5lZqfcA9A3c6RjUbxt70iqaRMpS4orNQkh7TE8mbQYofgk+/qlF4hJ0USuuzRyCMg==",
   "listen": "127.0.0.1:1080",
   "tunnel_path": "/",
-  "insecure": true,
   "fingerprint": "randomized",
   "shaping_mode": "balanced",
   "log_level": "info",

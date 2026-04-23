@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"io"
@@ -23,6 +24,17 @@ import (
 	"github.com/aesleif/nidhogg/internal/shaper"
 	"github.com/aesleif/nidhogg/internal/transport"
 )
+
+// testKeypair generates a fresh Ed25519 keypair for the test. Each test
+// gets an independent pair; production key material never appears here.
+func testKeypair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	return pub, priv
+}
 
 // startEchoServer starts a TCP server that echoes all received data back.
 func startEchoServer(t *testing.T) string {
@@ -49,12 +61,13 @@ func startEchoServer(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// startTunnelServer starts an httptest TLS server with TunnelHandler.
-func startTunnelServer(t *testing.T, psk []byte) *httptest.Server {
-	return startTunnelServerWithPM(t, psk, nil)
+// startTunnelServer starts an httptest TLS server with TunnelHandler
+// accepting the given public key as the only authorized client.
+func startTunnelServer(t *testing.T, pub ed25519.PublicKey) *httptest.Server {
+	return startTunnelServerWithPM(t, pub, nil)
 }
 
-func startTunnelServerWithPM(t *testing.T, psk []byte, pm *server.ProfileManager) *httptest.Server {
+func startTunnelServerWithPM(t *testing.T, pub ed25519.PublicKey, pm *server.ProfileManager) *httptest.Server {
 	t.Helper()
 
 	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +75,8 @@ func startTunnelServerWithPM(t *testing.T, psk []byte, pm *server.ProfileManager
 		w.Write([]byte("fallback"))
 	})
 
-	handler := server.TunnelHandler(psk, transport.NewValidator(psk), server.NopDestChecker{}, fallback, pm, nil)
+	auth := transport.NewAuthStore([]ed25519.PublicKey{pub}, []string{"test"})
+	handler := server.TunnelHandler(auth, server.NopDestChecker{}, fallback, pm, nil)
 
 	// Use h2c for testing (HTTP/2 without TLS) to avoid cert setup complexity
 	h2s := &http2.Server{}
@@ -76,17 +90,18 @@ func startTunnelServerWithPM(t *testing.T, psk []byte, pm *server.ProfileManager
 	return srv
 }
 
-// newTestDialer creates a Dialer pointed at the test server.
-func newTestDialer(t *testing.T, srv *httptest.Server, psk []byte) *client.Dialer {
-	return newTestDialerWithShaping(t, srv, psk, shaper.Disabled)
+// newTestDialer creates a Dialer pointed at the test server signing
+// handshakes with priv.
+func newTestDialer(t *testing.T, srv *httptest.Server, priv ed25519.PrivateKey) *client.Dialer {
+	return newTestDialerWithShaping(t, srv, priv, shaper.Disabled)
 }
 
-func newTestDialerWithShaping(t *testing.T, srv *httptest.Server, psk []byte, mode shaper.ShapingMode) *client.Dialer {
+func newTestDialerWithShaping(t *testing.T, srv *httptest.Server, priv ed25519.PrivateKey, mode shaper.ShapingMode) *client.Dialer {
 	t.Helper()
 	host := srv.URL[len("https://"):]
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
-	return client.NewDialer(host, "/", psk, pool, "standard", mode, 1, 0, 0)
+	return client.NewDialer(host, "/", priv, pool, "standard", mode, 1, 0, 0)
 }
 
 func makeTestProfile() *profile.Profile {
@@ -107,14 +122,14 @@ func makeTestProfile() *profile.Profile {
 }
 
 func TestTunnelEchoShaped(t *testing.T) {
-	psk := []byte("shaped-psk")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
 
 	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
 	pm.Push(makeTestProfile())
 
-	srv := startTunnelServerWithPM(t, psk, pm)
-	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Balanced)
+	srv := startTunnelServerWithPM(t, pub, pm)
+	dialer := newTestDialerWithShaping(t, srv, priv, shaper.Balanced)
 
 	conn, prof, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
@@ -151,7 +166,7 @@ func TestTunnelEchoShaped(t *testing.T) {
 // frame buffers per dead client. The fix closes the upstream as soon as
 // either relay direction exits.
 func TestTunnelClosesUpstreamWhenClientDisconnects(t *testing.T) {
-	psk := []byte("leak-psk")
+	pub, priv := testKeypair(t)
 
 	// Silent upstream: accept, read into the void, but never write.
 	// We signal `closed` from inside Accept's goroutine so the test can
@@ -178,8 +193,8 @@ func TestTunnelClosesUpstreamWhenClientDisconnects(t *testing.T) {
 		}
 	}()
 
-	srv := startTunnelServer(t, psk)
-	dialer := newTestDialer(t, srv, psk)
+	srv := startTunnelServer(t, pub)
+	dialer := newTestDialer(t, srv, priv)
 
 	conn, _, _, err := dialer.DialTunnel(context.Background(), silentLn.Addr().String())
 	if err != nil {
@@ -211,14 +226,14 @@ func TestTunnelClosesUpstreamWhenClientDisconnects(t *testing.T) {
 // version cache → prof returned nil → client unwrapped ShapedConn while
 // the server was still framing). The dialer must keep the profile cached.
 func TestTunnelEchoShapedSecondCall(t *testing.T) {
-	psk := []byte("cached-psk")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
 
 	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
 	pm.Push(makeTestProfile())
 
-	srv := startTunnelServerWithPM(t, psk, pm)
-	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Balanced)
+	srv := startTunnelServerWithPM(t, pub, pm)
+	dialer := newTestDialerWithShaping(t, srv, priv, shaper.Balanced)
 
 	// First call: server delivers profile JSON, dialer caches it.
 	conn1, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
@@ -254,7 +269,7 @@ func TestTunnelEchoShapedSecondCall(t *testing.T) {
 // path bypasses shaping. The two framing layers (shaper frames vs UDP
 // length-prefix datagrams) collided and corrupted every packet.
 func TestTunnelEchoUDPWithShaping(t *testing.T) {
-	psk := []byte("udp-shape-psk")
+	pub, priv := testKeypair(t)
 
 	// Echo server that reads UDP datagrams and bounces them back.
 	udpLn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -276,8 +291,8 @@ func TestTunnelEchoUDPWithShaping(t *testing.T) {
 	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
 	pm.Push(makeTestProfile())
 
-	srv := startTunnelServerWithPM(t, psk, pm)
-	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Balanced)
+	srv := startTunnelServerWithPM(t, pub, pm)
+	dialer := newTestDialerWithShaping(t, srv, priv, shaper.Balanced)
 
 	conn, _, _, err := dialer.DialTunnel(context.Background(), "udp:"+udpLn.LocalAddr().String())
 	if err != nil {
@@ -318,14 +333,14 @@ func TestTunnelEchoUDPWithShaping(t *testing.T) {
 // directions. The fix is for the server to only frame when the client
 // signals it will too.
 func TestTunnelEchoServerProfileClientNoShape(t *testing.T) {
-	psk := []byte("mixed-psk")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
 
 	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
 	pm.Push(makeTestProfile())
 
-	srv := startTunnelServerWithPM(t, psk, pm)
-	dialer := newTestDialerWithShaping(t, srv, psk, shaper.Disabled)
+	srv := startTunnelServerWithPM(t, pub, pm)
+	dialer := newTestDialerWithShaping(t, srv, priv, shaper.Disabled)
 
 	conn, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
@@ -348,10 +363,10 @@ func TestTunnelEchoServerProfileClientNoShape(t *testing.T) {
 }
 
 func TestTunnelEcho(t *testing.T) {
-	psk := []byte("test-psk-key")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
-	srv := startTunnelServer(t, psk)
-	dialer := newTestDialer(t, srv, psk)
+	srv := startTunnelServer(t, pub)
+	dialer := newTestDialer(t, srv, priv)
 
 	conn, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {
@@ -375,23 +390,23 @@ func TestTunnelEcho(t *testing.T) {
 	}
 }
 
-func TestTunnelWrongPSK(t *testing.T) {
-	psk := []byte("correct-psk")
-	startEchoServer(t) // not used, but keeps the pattern consistent
-	srv := startTunnelServer(t, psk)
-	dialer := newTestDialer(t, srv, []byte("wrong-psk-key"))
+func TestTunnelWrongKey(t *testing.T) {
+	pub, _ := testKeypair(t)
+	_, wrongPriv := testKeypair(t) // unrelated keypair — pubkey not authorized
+	srv := startTunnelServer(t, pub)
+	dialer := newTestDialer(t, srv, wrongPriv)
 
 	_, _, _, err := dialer.DialTunnel(context.Background(), "127.0.0.1:9999")
 	if err == nil {
-		t.Fatal("expected error with wrong PSK, got nil")
+		t.Fatal("expected error with unknown pubkey, got nil")
 	}
 }
 
 func TestTunnelMultiplex(t *testing.T) {
-	psk := []byte("multiplex-psk")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
-	srv := startTunnelServer(t, psk)
-	dialer := newTestDialer(t, srv, psk)
+	srv := startTunnelServer(t, pub)
+	dialer := newTestDialer(t, srv, priv)
 
 	const numConns = 10
 	var wg sync.WaitGroup
@@ -436,10 +451,10 @@ func TestTunnelMultiplex(t *testing.T) {
 }
 
 func TestTunnelLargeTransfer(t *testing.T) {
-	psk := []byte("large-psk")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
-	srv := startTunnelServer(t, psk)
-	dialer := newTestDialer(t, srv, psk)
+	srv := startTunnelServer(t, pub)
+	dialer := newTestDialer(t, srv, priv)
 
 	conn, _, _, err := dialer.DialTunnel(context.Background(), echoAddr)
 	if err != nil {

@@ -8,7 +8,7 @@ cmd/
   nidhogg-server/     HTTPS reverse proxy + tunnel server
 
 internal/
-  transport/          TLS dialing (uTLS), PSK handshake
+  transport/          TLS dialing (uTLS), Ed25519 handshake primitives, auth store
   shaper/             Traffic shaping (framing, CDF sampling)
   profile/            Profile struct, generation, LRU cache
   pcap/               Traffic recording from real connections
@@ -48,19 +48,37 @@ pkg/nidhogg (public API)
 
 All tunnel and telemetry traffic flows through the same HTTP endpoint (default `/`).
 
+Authentication is Ed25519 challenge-response over a single bidirectional
+HTTP/2 POST. The client does not include any secret in the request body;
+instead it sends its public key, reads a random nonce from the response
+body, signs it, and continues with the signed payload. The server looks
+the public key up in its `authorized_keys` list and verifies the
+signature against the stored pubkey.
+
 ```
-Client -> Server:
-  POST / HTTP/2
+Client -> Server (request body, phase 1):
+  [version:1B = 0x02] [pubkey:32B Ed25519 public key]
+
+Server -> Client (response body, phase 2):
+  200 OK
   Content-Type: application/octet-stream
-  Body: [handshake:57B] [destination] [client_profile_version:4B] [shaping_mode:1B] [payload...]
+  [nonce:32B crypto/rand]
 
-  Handshake     = [version:1B = 0x01] [timestamp:8B BE millis] [nonce:16B] [hmac-sha256:32B]
-  HMAC covers   : version + timestamp + nonce, key = PSK
-  destination   : binary TLV — see "Destination encoding" below
-  shaping_mode  : 0=disabled, 1=stream, 2=balanced, 3=stealth
+Client -> Server (request body, phase 3):
+  [signature:64B]      = Ed25519(priv, "nidhogg-auth-v2\x00" || nonce)
+  [destination]        = binary TLV — see "Destination encoding" below
+  [client_profile_version:4B]
+  [shaping_mode:1B]    = 0=disabled, 1=stream, 2=balanced, 3=stealth
+  [payload...]
 ```
 
-Non-matching requests are forwarded to the reverse proxy target (cover traffic).
+Non-matching requests (wrong version byte, unknown pubkey) are forwarded
+to the reverse proxy target (cover traffic) without the server ever
+writing a nonce — an active prober who doesn't know any authorized
+pubkey sees exactly the same bytes as a regular visitor to the cover
+site. A prober who already stole a pubkey from the server can observe
+the 33-byte response prefix (nonce + start of profile framing) but
+cannot complete the handshake without the corresponding private key.
 
 `shaping_mode` lets the server know whether the client will frame its traffic
 via `ShapedConn`. The server only frames the relay (in both directions) when
@@ -81,15 +99,14 @@ address or port follows.
 
 ### Profile delivery
 
-After the server accepts a tunnel, it responds with the current traffic
-profile inline. The 4-byte version header lets the client skip re-parsing
-when it already cached the profile:
+After the server verifies the signature, it streams the current traffic
+profile on the same response body (right after the 32-byte nonce). The
+4-byte version header lets the client skip re-parsing when it already
+cached the profile:
 
 ```
-Server -> Client:
-  200 OK
-  Content-Type: application/octet-stream
-  Body: [profile_version:4B BE CRC32] [profile_size:4B BE] [profile_json?] [relay data...]
+Server -> Client (response body, phase 4):
+  [profile_version:4B BE CRC32] [profile_size:4B BE] [profile_json?] [relay data...]
 ```
 
 - `profile_version == 0` AND `profile_size == 0`: server has no active profile.
@@ -98,17 +115,20 @@ Server -> Client:
 
 ### Telemetry
 
-Telemetry uses the same endpoint with `command = 0x03`:
+Telemetry uses the same endpoint and the same Ed25519 handshake with
+`command = 0x03`:
 
 ```
-Client -> Server:
-  POST / HTTP/2
-  Body: [handshake:57B] [0x03] [client_profile_version:4B] [0x00] [report_json]
+Client -> Server (request body, phases 1 and 3):
+  [version:1B=0x02] [pubkey:32B]      # phase 1 — client hello
+  [signature:64B] [0x03] [client_profile_version:4B] [0x00] [report_json]
+                                       # phase 3 — signed proof + payload
 
-Server -> Client:
+Server -> Client (response body, phases 2 and 4):
   200 OK
   Content-Type: application/octet-stream
-  Body: [profile_version:4B] [profile_size:4B] [profile_json?]
+  [nonce:32B]                          # phase 2 — challenge
+  [profile_version:4B] [profile_size:4B] [profile_json?]  # phase 4
 ```
 
 The `shaping_mode` byte is always `0x00` for telemetry — there is no

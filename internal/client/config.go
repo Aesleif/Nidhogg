@@ -1,6 +1,8 @@
 package client
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,7 +15,7 @@ import (
 
 type Config struct {
 	Server              string `json:"server"`
-	PSK                 string `json:"psk"`
+	PrivateKey          string `json:"private_key"` // base64-encoded Ed25519 private key (64 bytes: seed||pubkey)
 	Listen              string `json:"listen"`
 	TunnelPath          string `json:"tunnel_path"`
 	Fingerprint         string `json:"fingerprint"`          // "randomized" (default), "chrome", "firefox", "safari"
@@ -25,6 +27,19 @@ type Config struct {
 	ConnectionPoolSize  int    `json:"connection_pool_size"` // parallel TCP+TLS connections, default 4
 	IdleTimeout         string `json:"idle_timeout"`         // close tunnel after no activity, e.g. "5m", default "5m"
 	ConnectionMaxAge    string `json:"connection_max_age"`   // recycle pooled HTTP/2 conns after this age, e.g. "1h", default "1h"
+}
+
+// PrivateKeyBytes decodes the base64 PrivateKey field into an Ed25519
+// private key. Used by the client main to hand the key to the Dialer.
+func (c *Config) PrivateKeyBytes() (ed25519.PrivateKey, error) {
+	raw, err := base64.StdEncoding.DecodeString(c.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("private_key: base64 decode: %w", err)
+	}
+	if len(raw) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("private_key: want %d bytes, got %d", ed25519.PrivateKeySize, len(raw))
+	}
+	return ed25519.PrivateKey(raw), nil
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -41,8 +56,11 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("server is required")
 	}
-	if cfg.PSK == "" {
-		return nil, fmt.Errorf("psk is required")
+	if cfg.PrivateKey == "" {
+		return nil, fmt.Errorf("private_key is required")
+	}
+	if _, err := cfg.PrivateKeyBytes(); err != nil {
+		return nil, err
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:1080"

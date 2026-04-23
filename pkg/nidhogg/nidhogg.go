@@ -58,7 +58,7 @@ type TunnelConn interface {
 	net.Conn
 	// Profile returns public information about the active traffic profile.
 	Profile() ProfileInfo
-	// HandshakeRTT returns the time taken for the PSK handshake.
+	// HandshakeRTT returns the time taken for the Ed25519 handshake.
 	HandshakeRTT() time.Duration
 }
 

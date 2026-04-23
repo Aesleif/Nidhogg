@@ -2,7 +2,9 @@ package nidhogg
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,13 +18,25 @@ import (
 	"github.com/aesleif/nidhogg/internal/transport"
 )
 
+// ErrUnknownClient is returned by AuthenticateHandshake when the client
+// presents a public key that is not in the server's authorized set.
+// Callers (e.g. the Xray-core integration) should fall back to their
+// cover-site handler so the probe is indistinguishable from a regular
+// non-nidhogg HTTP request.
+var ErrUnknownClient = errors.New("nidhogg: unknown client public key")
+
 // ServerConfig configures a nidhogg tunnel server.
 type ServerConfig struct {
-	// PSK is the pre-shared key for tunnel authentication. Required.
-	PSK string
+	// AuthorizedKeys is the set of Ed25519 public keys allowed to open
+	// tunnels. At least one key is required.
+	AuthorizedKeys []ed25519.PublicKey
+	// AuthorizedKeyNames is a parallel slice of operator-facing labels
+	// (used only in server-side logs). May be shorter than
+	// AuthorizedKeys; missing entries become empty strings.
+	AuthorizedKeyNames []string
 	// CoverUpstream is the host:port of a real HTTPS site used as the
-	// PSK-fallback HTTP reverse-proxy target (and, when paired with the
-	// SNI router in the standalone server binary, the raw-TCP forward
+	// fallback reverse-proxy target (and, when paired with the SNI
+	// router in the standalone server binary, the raw-TCP forward
 	// target for non-matching SNIs). Required for NewServer.
 	CoverUpstream string
 	// TunnelPath is the HTTP path for the tunnel endpoint. Default: "/".
@@ -48,73 +62,67 @@ type TelemetryReport struct {
 
 // Server handles incoming nidhogg tunnel connections.
 type Server struct {
-	psk       []byte
-	validator *transport.HandshakeValidator
-	pm        *server.ProfileManager
-	agg       *telemetry.Aggregator
-	handler   http.Handler
+	auth    *transport.AuthStore
+	pm      *server.ProfileManager
+	agg     *telemetry.Aggregator
+	handler http.Handler
+}
+
+func applyServerDefaults(cfg *ServerConfig) error {
+	if len(cfg.AuthorizedKeys) == 0 {
+		return fmt.Errorf("nidhogg: AuthorizedKeys is required (at least one Ed25519 pubkey)")
+	}
+	for i, k := range cfg.AuthorizedKeys {
+		if len(k) != ed25519.PublicKeySize {
+			return fmt.Errorf("nidhogg: AuthorizedKeys[%d] is not a 32-byte Ed25519 pubkey", i)
+		}
+	}
+	if cfg.TunnelPath == "" {
+		cfg.TunnelPath = "/"
+	}
+	if len(cfg.ProfileTargets) == 0 {
+		cfg.ProfileTargets = []string{"google.com"}
+	}
+	if cfg.ProfileInterval == 0 {
+		cfg.ProfileInterval = 6 * time.Hour
+	}
+	if cfg.ProfileMinSnapshots <= 0 {
+		cfg.ProfileMinSnapshots = 20
+	}
+	if cfg.TelemetryCriticalThreshold <= 0 {
+		cfg.TelemetryCriticalThreshold = 3
+	}
+	return nil
 }
 
 // NewServerEmbedded creates a server for embedded use (e.g. inside Xray-core)
 // where routing is handled externally. No reverse proxy fallback is created.
 func NewServerEmbedded(cfg ServerConfig) (*Server, error) {
-	if cfg.PSK == "" {
-		return nil, fmt.Errorf("nidhogg: PSK is required")
-	}
-	if cfg.TunnelPath == "" {
-		cfg.TunnelPath = "/"
-	}
-	if len(cfg.ProfileTargets) == 0 {
-		cfg.ProfileTargets = []string{"google.com"}
-	}
-	if cfg.ProfileInterval == 0 {
-		cfg.ProfileInterval = 6 * time.Hour
-	}
-	if cfg.ProfileMinSnapshots <= 0 {
-		cfg.ProfileMinSnapshots = 20
-	}
-	if cfg.TelemetryCriticalThreshold <= 0 {
-		cfg.TelemetryCriticalThreshold = 3
+	if err := applyServerDefaults(&cfg); err != nil {
+		return nil, err
 	}
 
-	psk := []byte(cfg.PSK)
+	auth := transport.NewAuthStore(cfg.AuthorizedKeys, cfg.AuthorizedKeyNames)
 	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileInterval, cfg.ProfileMinSnapshots)
 	agg := telemetry.NewAggregator(pm, cfg.TelemetryCriticalThreshold)
 
 	return &Server{
-		psk:       psk,
-		validator: transport.NewValidator(psk),
-		pm:        pm,
-		agg:       agg,
+		auth: auth,
+		pm:   pm,
+		agg:  agg,
 	}, nil
 }
 
 // NewServer creates a tunnel server with the given configuration.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	if cfg.PSK == "" {
-		return nil, fmt.Errorf("nidhogg: PSK is required")
+	if err := applyServerDefaults(&cfg); err != nil {
+		return nil, err
 	}
 	if cfg.CoverUpstream == "" {
 		return nil, fmt.Errorf("nidhogg: cover_upstream is required")
 	}
-	if cfg.TunnelPath == "" {
-		cfg.TunnelPath = "/"
-	}
-	if len(cfg.ProfileTargets) == 0 {
-		cfg.ProfileTargets = []string{"google.com"}
-	}
-	if cfg.ProfileInterval == 0 {
-		cfg.ProfileInterval = 6 * time.Hour
-	}
-	if cfg.ProfileMinSnapshots <= 0 {
-		cfg.ProfileMinSnapshots = 20
-	}
-	if cfg.TelemetryCriticalThreshold <= 0 {
-		cfg.TelemetryCriticalThreshold = 3
-	}
 
-	psk := []byte(cfg.PSK)
-
+	auth := transport.NewAuthStore(cfg.AuthorizedKeys, cfg.AuthorizedKeyNames)
 	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileInterval, cfg.ProfileMinSnapshots)
 	agg := telemetry.NewAggregator(pm, cfg.TelemetryCriticalThreshold)
 
@@ -123,15 +131,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("nidhogg: %w", err)
 	}
 
-	validator := transport.NewValidator(psk)
-	handler := server.TunnelHandler(psk, validator, server.DefaultDestACL{}, proxy, pm, agg)
+	handler := server.TunnelHandler(auth, server.DefaultDestACL{}, proxy, pm, agg)
 
 	return &Server{
-		psk:       psk,
-		validator: validator,
-		pm:        pm,
-		agg:       agg,
-		handler:   handler,
+		auth:    auth,
+		pm:      pm,
+		agg:     agg,
+		handler: handler,
 	}, nil
 }
 
@@ -142,23 +148,65 @@ func (s *Server) Handler() http.Handler {
 }
 
 // StartProfileManager runs background traffic collection and profile
-// generation. It also starts the handshake validator's nonce cleanup
-// loop so stale entries are swept during idle periods. Blocks until
-// ctx is cancelled.
+// generation. Blocks until ctx is cancelled.
 func (s *Server) StartProfileManager(ctx context.Context) {
-	go s.validator.StartCleanupLoop(ctx, time.Minute)
 	s.pm.Start(ctx)
 }
 
-// ValidateHandshake validates a PSK handshake from a client.
-// Returns true if the handshake is valid.
-func (s *Server) ValidateHandshake(data []byte) (bool, error) {
-	return s.validator.Validate(data)
+// AuthenticateHandshake runs the full Ed25519 challenge-response on a
+// bidirectional HTTP stream:
+//
+//  1. Reads the client hello ([version:1][pubkey:32]) from r.
+//  2. Looks up the pubkey. On miss, returns ErrUnknownClient — the
+//     caller should fall back to its cover-site handler to keep the
+//     response indistinguishable from a non-nidhogg request.
+//  3. Generates a random 32-byte challenge, writes it to w, flushes.
+//  4. Reads the client's 64-byte Ed25519 signature and verifies it
+//     against the claimed pubkey.
+//
+// On success returns the authenticated client public key. On failure
+// other than ErrUnknownClient, the server has already committed to
+// writing bytes to w and the caller should close the connection rather
+// than attempt a fallback.
+func (s *Server) AuthenticateHandshake(w io.Writer, r io.Reader, flusher http.Flusher) (ed25519.PublicKey, error) {
+	helloBuf := make([]byte, transport.HelloSize)
+	if _, err := io.ReadFull(r, helloBuf); err != nil {
+		return nil, fmt.Errorf("read hello: %w", err)
+	}
+	pub, err := transport.ParseHello(helloBuf)
+	if err != nil {
+		return nil, ErrUnknownClient
+	}
+	if !s.auth.Has(pub) {
+		return nil, ErrUnknownClient
+	}
+
+	nonce, err := transport.GenerateNonce()
+	if err != nil {
+		return nil, fmt.Errorf("nonce: %w", err)
+	}
+	if _, err := w.Write(nonce[:]); err != nil {
+		return nil, fmt.Errorf("write nonce: %w", err)
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	sig := make([]byte, transport.SignatureSize)
+	if _, err := io.ReadFull(r, sig); err != nil {
+		return nil, fmt.Errorf("read signature: %w", err)
+	}
+	if !transport.VerifyChallenge(pub, nonce, sig) {
+		return nil, fmt.Errorf("invalid signature")
+	}
+	return pub, nil
 }
 
-// HandshakeSize returns the expected PSK handshake size in bytes.
-func HandshakeSize() int {
-	return transport.HandshakeSize
+// AuthorizedKeyName returns the operator-assigned label for pub, or ""
+// if the key is not authorized. Useful for log lines in integrations
+// (e.g. the Xray-core fork).
+func (s *Server) AuthorizedKeyName(pub ed25519.PublicKey) string {
+	return s.auth.Name(pub)
 }
 
 // CurrentProfileJSON returns the current traffic profile as JSON bytes and its version hash.

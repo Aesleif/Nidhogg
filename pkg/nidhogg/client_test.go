@@ -3,6 +3,9 @@ package nidhogg_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
@@ -12,8 +15,6 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
-
-	"crypto/x509"
 
 	"github.com/aesleif/nidhogg/internal/pcap"
 	"github.com/aesleif/nidhogg/internal/profile"
@@ -52,13 +53,14 @@ func startEchoServer(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-func startTestServer(t *testing.T, psk []byte, pm *server.ProfileManager) *httptest.Server {
+func startTestServer(t *testing.T, pub ed25519.PublicKey, pm *server.ProfileManager) *httptest.Server {
 	t.Helper()
 	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("fallback"))
 	})
-	handler := server.TunnelHandler(psk, transport.NewValidator(psk), server.NopDestChecker{}, fallback, pm, nil)
+	auth := transport.NewAuthStore([]ed25519.PublicKey{pub}, []string{"test"})
+	handler := server.TunnelHandler(auth, server.NopDestChecker{}, fallback, pm, nil)
 	h2s := &http2.Server{}
 	h2cHandler := h2c.NewHandler(handler, h2s)
 	srv := httptest.NewUnstartedServer(h2cHandler)
@@ -66,6 +68,16 @@ func startTestServer(t *testing.T, psk []byte, pm *server.ProfileManager) *httpt
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// testKeypair generates a fresh Ed25519 keypair for the test.
+func testKeypair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	return pub, priv
 }
 
 func makeTestProfile() *profile.Profile {
@@ -93,10 +105,11 @@ func TestNewClientValidation(t *testing.T) {
 
 	_, err = nidhogg.NewClient(nidhogg.ClientConfig{Server: "host:443"})
 	if err == nil {
-		t.Fatal("expected error for missing PSK")
+		t.Fatal("expected error for missing PrivateKey")
 	}
 
-	c, err := nidhogg.NewClient(nidhogg.ClientConfig{Server: "host:443", PSK: "secret"})
+	_, priv := testKeypair(t)
+	c, err := nidhogg.NewClient(nidhogg.ClientConfig{Server: "host:443", PrivateKey: priv})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,14 +117,14 @@ func TestNewClientValidation(t *testing.T) {
 }
 
 func TestClientDialEcho(t *testing.T) {
-	psk := []byte("test-psk")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
-	srv := startTestServer(t, psk, nil)
+	srv := startTestServer(t, pub, nil)
 
 	host := srv.URL[len("https://"):]
 	client, err := nidhogg.NewClientWithRootCAs(nidhogg.ClientConfig{
 		Server:      host,
-		PSK:         string(psk),
+		PrivateKey:  priv,
 		Fingerprint: "standard",
 	}, testRootCAs(srv))
 	if err != nil {
@@ -144,18 +157,18 @@ func TestClientDialEcho(t *testing.T) {
 }
 
 func TestClientDialShaped(t *testing.T) {
-	psk := []byte("shaped-psk")
+	pub, priv := testKeypair(t)
 	echoAddr := startEchoServer(t)
 
 	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
 	pm.Push(makeTestProfile())
 
-	srv := startTestServer(t, psk, pm)
+	srv := startTestServer(t, pub, pm)
 	host := srv.URL[len("https://"):]
 
 	client, err := nidhogg.NewClientWithRootCAs(nidhogg.ClientConfig{
 		Server:      host,
-		PSK:         string(psk),
+		PrivateKey:  priv,
 		Fingerprint: "standard",
 		ShapingMode: nidhogg.ShapingBalanced,
 	}, testRootCAs(srv))
@@ -188,14 +201,15 @@ func TestClientDialShaped(t *testing.T) {
 	}
 }
 
-func TestClientDialWrongPSK(t *testing.T) {
-	psk := []byte("correct-psk")
-	srv := startTestServer(t, psk, nil)
+func TestClientDialWrongKey(t *testing.T) {
+	pub, _ := testKeypair(t)
+	_, wrongPriv := testKeypair(t) // unrelated keypair — pubkey not authorized
+	srv := startTestServer(t, pub, nil)
 	host := srv.URL[len("https://"):]
 
 	client, err := nidhogg.NewClientWithRootCAs(nidhogg.ClientConfig{
 		Server:      host,
-		PSK:         "wrong-psk",
+		PrivateKey:  wrongPriv,
 		Fingerprint: "standard",
 	}, testRootCAs(srv))
 	if err != nil {
@@ -205,6 +219,6 @@ func TestClientDialWrongPSK(t *testing.T) {
 
 	_, err = client.Dial(context.Background(), "127.0.0.1:9999")
 	if err == nil {
-		t.Fatal("expected error with wrong PSK")
+		t.Fatal("expected error with unknown pubkey")
 	}
 }

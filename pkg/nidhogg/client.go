@@ -2,6 +2,7 @@ package nidhogg
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/x509"
 	"fmt"
 	"time"
@@ -13,8 +14,9 @@ import (
 type ClientConfig struct {
 	// Server is the nidhogg server address in "host:port" format. Required.
 	Server string
-	// PSK is the pre-shared key for tunnel authentication. Required.
-	PSK string
+	// PrivateKey is the client's Ed25519 private key (64 bytes:
+	// seed || pubkey, as produced by ed25519.GenerateKey). Required.
+	PrivateKey ed25519.PrivateKey
 	// TunnelPath is the HTTP path for the tunnel endpoint. Default: "/".
 	TunnelPath string
 	// Fingerprint controls the TLS ClientHello: "randomized" (default),
@@ -55,8 +57,8 @@ func newClient(cfg ClientConfig, rootCAs *x509.CertPool) (*Client, error) {
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("nidhogg: server address is required")
 	}
-	if cfg.PSK == "" {
-		return nil, fmt.Errorf("nidhogg: PSK is required")
+	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("nidhogg: PrivateKey is required (%d bytes)", ed25519.PrivateKeySize)
 	}
 	if cfg.TunnelPath == "" {
 		cfg.TunnelPath = "/"
@@ -77,7 +79,7 @@ func newClient(cfg ClientConfig, rootCAs *x509.CertPool) (*Client, error) {
 	d := client.NewDialer(
 		cfg.Server,
 		cfg.TunnelPath,
-		[]byte(cfg.PSK),
+		cfg.PrivateKey,
 		rootCAs,
 		cfg.Fingerprint,
 		toInternalMode(cfg.ShapingMode),
