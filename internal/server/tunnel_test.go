@@ -20,6 +20,7 @@ import (
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/server"
 	"github.com/aesleif/nidhogg/internal/shaper"
+	"github.com/aesleif/nidhogg/internal/transport"
 )
 
 // startEchoServer starts a TCP server that echoes all received data back.
@@ -60,7 +61,7 @@ func startTunnelServerWithPM(t *testing.T, psk []byte, pm *server.ProfileManager
 		w.Write([]byte("fallback"))
 	})
 
-	handler := server.TunnelHandler(psk, fallback, pm, nil)
+	handler := server.TunnelHandler(psk, transport.NewValidator(psk), fallback, pm, nil)
 
 	// Use h2c for testing (HTTP/2 without TLS) to avoid cert setup complexity
 	h2s := &http2.Server{}

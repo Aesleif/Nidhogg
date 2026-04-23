@@ -23,6 +23,7 @@ import (
 	"github.com/aesleif/nidhogg/internal/logging"
 	"github.com/aesleif/nidhogg/internal/server"
 	"github.com/aesleif/nidhogg/internal/telemetry"
+	"github.com/aesleif/nidhogg/internal/transport"
 )
 
 func main() {
@@ -44,6 +45,8 @@ func main() {
 
 	psk := []byte(cfg.PSK)
 
+	validator := transport.NewValidator(psk)
+
 	// Profile manager: generates traffic profiles from target sites
 	pm := server.NewProfileManager(cfg.ProfileTargets, cfg.ProfileIntervalDuration(), cfg.ProfileMinSnapshots)
 
@@ -52,7 +55,7 @@ func main() {
 
 	// Tunnel handler on tunnel_path, everything else goes to reverse proxy
 	mux := http.NewServeMux()
-	tunnelHandler := server.TunnelHandler(psk, proxy, pm, agg)
+	tunnelHandler := server.TunnelHandler(psk, validator, proxy, pm, agg)
 	mux.Handle(cfg.TunnelPath, tunnelHandler)
 	if cfg.TunnelPath != "/" {
 		mux.Handle("/", proxy)
@@ -137,6 +140,9 @@ func main() {
 	defer stop()
 
 	go pm.Start(ctx)
+	// Sweep expired nonces every minute so idle periods don't retain
+	// stale entries up to the 10 000-nonce cap until the next handshake.
+	go validator.StartCleanupLoop(ctx, time.Minute)
 
 	// SNI-router loop: peek every accepted TLS ClientHello and dispatch.
 	// SNI matching cfg.Domain → terminate TLS locally and serve nidhogg.

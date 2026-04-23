@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -58,6 +59,14 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 		// 64 KiB frame size — see server config for rationale (memory vs
 		// per-frame overhead tradeoff).
 		MaxReadFrameSize: 1 << 16,
+		// Keepalive: without these a silently-dead server end leaks tunnel
+		// streams (and their 64 KiB writeRequestBody buffers) until the
+		// caller's context is cancelled. Ping after 30 s of idle read,
+		// fail the connection if no pong within 15 s; fail writes stalled
+		// for more than 30 s.
+		ReadIdleTimeout:  30 * time.Second,
+		PingTimeout:      15 * time.Second,
+		WriteByteTimeout: 30 * time.Second,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 			return dialTLS(ctx, network, addr)
 		},
@@ -73,6 +82,9 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 		}
 		h2transport = &http2.Transport{
 			MaxReadFrameSize: 1 << 16,
+			ReadIdleTimeout:  30 * time.Second,
+			PingTimeout:      15 * time.Second,
+			WriteByteTimeout: 30 * time.Second,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: insecure,
 			},
@@ -181,8 +193,18 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 			resp.Body.Close()
 			return nil, nil, 0, fmt.Errorf("parse profile: %w", err)
 		}
-		d.profileVersion.Store(serverVersion)
+		prevVersion := d.profileVersion.Swap(serverVersion)
 		d.cachedProfile.Store(prof)
+		// Log only on version change — DialTunnel runs per-stream and
+		// would otherwise emit an INFO line for every connection.
+		if prevVersion != serverVersion {
+			slog.Info("profile: applied",
+				"version", serverVersion,
+				"previous", prevVersion,
+				"name", prof.Name,
+				"cdf_points", len(prof.SendSizeCDF),
+				"avg_burst", prof.AvgBurstLen)
+		}
 	} else if serverVersion != 0 {
 		// Server has a profile but version matches — reuse the cached one.
 		// Without this the next Dial() would return a nil profile and

@@ -199,6 +199,50 @@ func TestNonceTimeEviction(t *testing.T) {
 	}
 }
 
+func TestSweepExpired(t *testing.T) {
+	psk := []byte("sweep-key")
+	v := NewValidator(psk)
+
+	baseTime := time.Now()
+	v.now = func() time.Time { return baseTime }
+
+	// Insert a batch of fresh nonces under the current "now".
+	const n = 100
+	for i := 0; i < n; i++ {
+		data, _ := GenerateHandshake(psk)
+		if ok, err := v.Validate(data); !ok {
+			t.Fatalf("Validate at i=%d: %v", i, err)
+		}
+	}
+	if got := len(v.nonces); got != n {
+		t.Fatalf("before sweep: len(nonces)=%d, want %d", got, n)
+	}
+
+	// Advance past the eviction cutoff (2 * maxClockSkew) and sweep.
+	v.now = func() time.Time { return baseTime.Add(3 * maxClockSkew) }
+	v.sweepExpired()
+
+	if got := len(v.nonces); got != 0 {
+		t.Fatalf("after sweep: len(nonces)=%d, want 0", got)
+	}
+
+	// Nonces still younger than the cutoff must survive a sweep.
+	for i := 0; i < 10; i++ {
+		data, _ := GenerateHandshake(psk)
+		binary.BigEndian.PutUint64(data[1:9], uint64(v.now().UnixMilli()))
+		mac := hmac.New(sha256.New, psk)
+		mac.Write(data[0:25])
+		copy(data[25:57], mac.Sum(nil))
+		if ok, err := v.Validate(data); !ok {
+			t.Fatalf("Validate fresh at i=%d: %v", i, err)
+		}
+	}
+	v.sweepExpired() // same "now" — nothing should be dropped
+	if got := len(v.nonces); got != 10 {
+		t.Fatalf("fresh nonces evicted: len=%d, want 10", got)
+	}
+}
+
 func TestConcurrentValidation(t *testing.T) {
 	psk := []byte("concurrent-key")
 	v := NewValidator(psk)

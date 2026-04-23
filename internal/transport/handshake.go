@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -123,4 +124,35 @@ func (v *HandshakeValidator) Validate(data []byte) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// StartCleanupLoop periodically evicts expired nonces so the map
+// does not retain stale entries on an idle server. Validate() already
+// evicts lazily once the map hits nonceRingSize, but an idle server
+// can sit at ~cap with all-stale nonces until the next handshake.
+// Runs until ctx is cancelled.
+func (v *HandshakeValidator) StartCleanupLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			v.sweepExpired()
+		}
+	}
+}
+
+// sweepExpired removes nonces older than 2*maxClockSkew. Same cutoff
+// the lazy sweep in Validate() uses.
+func (v *HandshakeValidator) sweepExpired() {
+	cutoff := v.now().Add(-2 * maxClockSkew).UnixMilli()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for k, ts := range v.nonces {
+		if ts < cutoff {
+			delete(v.nonces, k)
+		}
+	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/aesleif/nidhogg/internal/pcap"
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/server"
+	"github.com/aesleif/nidhogg/internal/transport"
 	"github.com/aesleif/nidhogg/pkg/nidhogg"
 )
 
@@ -48,7 +49,7 @@ func startTestServer(t *testing.T, psk []byte, pm *server.ProfileManager) *httpt
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("fallback"))
 	})
-	handler := server.TunnelHandler(psk, fallback, pm, nil)
+	handler := server.TunnelHandler(psk, transport.NewValidator(psk), fallback, pm, nil)
 	h2s := &http2.Server{}
 	h2cHandler := h2c.NewHandler(handler, h2s)
 	srv := httptest.NewUnstartedServer(h2cHandler)

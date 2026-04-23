@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"strings"
@@ -138,13 +139,26 @@ func (pm *ProfileManager) bootstrap() {
 	name := strings.Join(pm.targets, "+")
 	prof := profile.Generate(name, snapshots)
 	pm.cache.Push(prof)
-	slog.Info("profile: bootstrap complete",
+	slog.Info("profile: generated",
+		"phase", "bootstrap",
 		"name", prof.Name,
+		"version", profileVersion(prof),
 		"send_cdf_points", len(prof.SendSizeCDF),
 		"avg_burst", prof.AvgBurstLen,
 		"send_p50", int(profile.SamplePercentile(prof.SendSizeCDF, 0.5)),
 		"send_p95", int(profile.SamplePercentile(prof.SendSizeCDF, 0.95)),
 		"send_p99", int(profile.SamplePercentile(prof.SendSizeCDF, 0.99)))
+}
+
+// profileVersion serializes prof to JSON and returns the VersionHash
+// the server uses when advertising this profile to clients. Marshaling
+// cost is negligible — called once per generation (rare).
+func profileVersion(prof *profile.Profile) uint32 {
+	data, err := json.Marshal(prof)
+	if err != nil {
+		return 0
+	}
+	return profile.VersionHash(data)
 }
 
 func (pm *ProfileManager) regenerate(trigger string) {
@@ -173,10 +187,12 @@ func (pm *ProfileManager) regenerate(trigger string) {
 	name := strings.Join(pm.targets, "+")
 	prof := profile.Generate(name, snaps)
 	pm.cache.Push(prof)
-	slog.Info("profile: regenerated",
+	slog.Info("profile: generated",
+		"phase", "regenerated",
 		"trigger", trigger,
 		"snapshots", len(snaps),
 		"name", prof.Name,
+		"version", profileVersion(prof),
 		"send_cdf_points", len(prof.SendSizeCDF),
 		"avg_burst", prof.AvgBurstLen,
 		"send_p50", int(profile.SamplePercentile(prof.SendSizeCDF, 0.5)),

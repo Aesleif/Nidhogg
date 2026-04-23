@@ -25,9 +25,10 @@ const minSamplesForSnapshot = 10
 // If the PSK in the request body matches, the connection is tunneled
 // to the destination specified by the client. Otherwise, the request
 // is forwarded to the fallback handler (reverse proxy).
-func TunnelHandler(psk []byte, fallback http.Handler, pm *ProfileManager, agg *telemetry.Aggregator) http.Handler {
-	validator := transport.NewValidator(psk)
-
+// The caller owns the validator's lifecycle — typically starts
+// validator.StartCleanupLoop on server ctx so stale nonces don't
+// accumulate during idle periods.
+func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, fallback http.Handler, pm *ProfileManager, agg *telemetry.Aggregator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			fallback.ServeHTTP(w, r)

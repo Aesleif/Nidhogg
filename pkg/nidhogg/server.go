@@ -123,11 +123,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("nidhogg: %w", err)
 	}
 
-	handler := server.TunnelHandler(psk, proxy, pm, agg)
+	validator := transport.NewValidator(psk)
+	handler := server.TunnelHandler(psk, validator, proxy, pm, agg)
 
 	return &Server{
 		psk:       psk,
-		validator: transport.NewValidator(psk),
+		validator: validator,
 		pm:        pm,
 		agg:       agg,
 		handler:   handler,
@@ -141,8 +142,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 // StartProfileManager runs background traffic collection and profile
-// generation. It blocks until ctx is cancelled.
+// generation. It also starts the handshake validator's nonce cleanup
+// loop so stale entries are swept during idle periods. Blocks until
+// ctx is cancelled.
 func (s *Server) StartProfileManager(ctx context.Context) {
+	go s.validator.StartCleanupLoop(ctx, time.Minute)
 	s.pm.Start(ctx)
 }
 
