@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
@@ -61,7 +62,7 @@ func startTunnelServerWithPM(t *testing.T, psk []byte, pm *server.ProfileManager
 		w.Write([]byte("fallback"))
 	})
 
-	handler := server.TunnelHandler(psk, transport.NewValidator(psk), fallback, pm, nil)
+	handler := server.TunnelHandler(psk, transport.NewValidator(psk), server.NopDestChecker{}, fallback, pm, nil)
 
 	// Use h2c for testing (HTTP/2 without TLS) to avoid cert setup complexity
 	h2s := &http2.Server{}
@@ -83,7 +84,9 @@ func newTestDialer(t *testing.T, srv *httptest.Server, psk []byte) *client.Diale
 func newTestDialerWithShaping(t *testing.T, srv *httptest.Server, psk []byte, mode shaper.ShapingMode) *client.Dialer {
 	t.Helper()
 	host := srv.URL[len("https://"):]
-	return client.NewDialer(host, "/", psk, true, "standard", mode, 1, 0, 0)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	return client.NewDialer(host, "/", psk, pool, "standard", mode, 1, 0, 0)
 }
 
 func makeTestProfile() *profile.Profile {

@@ -124,7 +124,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	validator := transport.NewValidator(psk)
-	handler := server.TunnelHandler(psk, validator, proxy, pm, agg)
+	handler := server.TunnelHandler(psk, validator, server.DefaultDestACL{}, proxy, pm, agg)
 
 	return &Server{
 		psk:       psk,

@@ -2,6 +2,7 @@ package nidhogg
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"time"
 
@@ -16,8 +17,6 @@ type ClientConfig struct {
 	PSK string
 	// TunnelPath is the HTTP path for the tunnel endpoint. Default: "/".
 	TunnelPath string
-	// Insecure skips TLS certificate verification.
-	Insecure bool
 	// Fingerprint controls the TLS ClientHello: "randomized" (default),
 	// "chrome", "firefox", "safari".
 	Fingerprint string
@@ -47,6 +46,12 @@ type Client struct {
 
 // NewClient creates a tunnel client with the given configuration.
 func NewClient(cfg ClientConfig) (*Client, error) {
+	return newClient(cfg, nil)
+}
+
+// newClient is the shared constructor used by NewClient (production,
+// rootCAs=nil → system roots) and by tests which inject a custom pool.
+func newClient(cfg ClientConfig, rootCAs *x509.CertPool) (*Client, error) {
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("nidhogg: server address is required")
 	}
@@ -73,7 +78,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		cfg.Server,
 		cfg.TunnelPath,
 		[]byte(cfg.PSK),
-		cfg.Insecure,
+		rootCAs,
 		cfg.Fingerprint,
 		toInternalMode(cfg.ShapingMode),
 		cfg.ConnectionPoolSize,

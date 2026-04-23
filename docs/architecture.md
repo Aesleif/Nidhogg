@@ -88,7 +88,7 @@ when it already cached the profile:
 ```
 Server -> Client:
   200 OK
-  X-Nidhogg-Tunnel: 1
+  Content-Type: application/octet-stream
   Body: [profile_version:4B BE CRC32] [profile_size:4B BE] [profile_json?] [relay data...]
 ```
 
@@ -107,7 +107,7 @@ Client -> Server:
 
 Server -> Client:
   200 OK
-  X-Nidhogg-Tunnel: 1
+  Content-Type: application/octet-stream
   Body: [profile_version:4B] [profile_size:4B] [profile_json?]
 ```
 

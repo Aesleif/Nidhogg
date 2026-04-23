@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -48,11 +49,13 @@ type Dialer struct {
 // connMaxAge retires pooled HTTP/2 connections older than that and
 // gracefully redials replacements, preventing slow accumulation of
 // internal h2 state and stale TCP path issues. Zero disables recycling.
-func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int, idleTimeout, connMaxAge time.Duration) *Dialer {
+// rootCAs overrides the system trust anchors; nil uses system roots.
+// Tests supply their httptest server's cert pool here.
+func NewDialer(server, tunnelPath string, psk []byte, rootCAs *x509.CertPool, fingerprint string, shapingMode shaper.ShapingMode, poolSize int, idleTimeout, connMaxAge time.Duration) *Dialer {
 	helloID, _ := transport.FingerprintID(fingerprint) // validated in config
 
 	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return transport.DialTLS(ctx, network, addr, insecure, helloID)
+		return transport.DialTLS(ctx, network, addr, rootCAs, helloID)
 	}
 
 	h2transport := &http2.Transport{
@@ -76,8 +79,8 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 	if helloID == (utls.ClientHelloID{}) {
 		stdDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, addr, &tls.Config{
-				InsecureSkipVerify: insecure,
-				NextProtos:         []string{"h2"},
+				RootCAs:    rootCAs,
+				NextProtos: []string{"h2"},
 			})
 		}
 		h2transport = &http2.Transport{
@@ -86,7 +89,7 @@ func NewDialer(server, tunnelPath string, psk []byte, insecure bool, fingerprint
 			PingTimeout:      15 * time.Second,
 			WriteByteTimeout: 30 * time.Second,
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: insecure,
+				RootCAs: rootCAs,
 			},
 		}
 		dialTLS = stdDial
@@ -156,7 +159,7 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 	}
 	handshakeRTT := time.Since(dialStart)
 
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Nidhogg-Tunnel") != "1" {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		pw.Close()
 		resp.Body.Close()
@@ -180,6 +183,16 @@ func (d *Dialer) DialTunnel(ctx context.Context, dest string) (net.Conn, *profil
 		return nil, nil, 0, fmt.Errorf("read profile size: %w", err)
 	}
 	profSize := binary.BigEndian.Uint32(sizeBuf[:])
+	// Sanity bound: real profiles are ~10–50 KB of JSON. A garbage value
+	// here (e.g. from a fallback cover-site HTML body returned with 200
+	// OK when the tunnel wasn't actually accepted) would otherwise trigger
+	// a huge allocation. 1 MiB is well above the legitimate maximum.
+	const maxProfileSize = 1 << 20
+	if profSize > maxProfileSize {
+		pw.Close()
+		resp.Body.Close()
+		return nil, nil, 0, fmt.Errorf("profile size out of range: %d", profSize)
+	}
 	if profSize > 0 {
 		profJSON := make([]byte, profSize)
 		if _, err := io.ReadFull(resp.Body, profJSON); err != nil {

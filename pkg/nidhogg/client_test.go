@@ -13,12 +13,21 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
+	"crypto/x509"
+
 	"github.com/aesleif/nidhogg/internal/pcap"
 	"github.com/aesleif/nidhogg/internal/profile"
 	"github.com/aesleif/nidhogg/internal/server"
 	"github.com/aesleif/nidhogg/internal/transport"
 	"github.com/aesleif/nidhogg/pkg/nidhogg"
 )
+
+// testRootCAs returns a cert pool trusting srv's self-signed cert.
+func testRootCAs(srv *httptest.Server) *x509.CertPool {
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	return pool
+}
 
 func startEchoServer(t *testing.T) string {
 	t.Helper()
@@ -49,7 +58,7 @@ func startTestServer(t *testing.T, psk []byte, pm *server.ProfileManager) *httpt
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("fallback"))
 	})
-	handler := server.TunnelHandler(psk, transport.NewValidator(psk), fallback, pm, nil)
+	handler := server.TunnelHandler(psk, transport.NewValidator(psk), server.NopDestChecker{}, fallback, pm, nil)
 	h2s := &http2.Server{}
 	h2cHandler := h2c.NewHandler(handler, h2s)
 	srv := httptest.NewUnstartedServer(h2cHandler)
@@ -100,12 +109,11 @@ func TestClientDialEcho(t *testing.T) {
 	srv := startTestServer(t, psk, nil)
 
 	host := srv.URL[len("https://"):]
-	client, err := nidhogg.NewClient(nidhogg.ClientConfig{
+	client, err := nidhogg.NewClientWithRootCAs(nidhogg.ClientConfig{
 		Server:      host,
 		PSK:         string(psk),
-		Insecure:    true,
 		Fingerprint: "standard",
-	})
+	}, testRootCAs(srv))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -145,13 +153,12 @@ func TestClientDialShaped(t *testing.T) {
 	srv := startTestServer(t, psk, pm)
 	host := srv.URL[len("https://"):]
 
-	client, err := nidhogg.NewClient(nidhogg.ClientConfig{
+	client, err := nidhogg.NewClientWithRootCAs(nidhogg.ClientConfig{
 		Server:      host,
 		PSK:         string(psk),
-		Insecure:    true,
 		Fingerprint: "standard",
 		ShapingMode: nidhogg.ShapingBalanced,
-	})
+	}, testRootCAs(srv))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -186,12 +193,11 @@ func TestClientDialWrongPSK(t *testing.T) {
 	srv := startTestServer(t, psk, nil)
 	host := srv.URL[len("https://"):]
 
-	client, err := nidhogg.NewClient(nidhogg.ClientConfig{
+	client, err := nidhogg.NewClientWithRootCAs(nidhogg.ClientConfig{
 		Server:      host,
 		PSK:         "wrong-psk",
-		Insecure:    true,
 		Fingerprint: "standard",
-	})
+	}, testRootCAs(srv))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

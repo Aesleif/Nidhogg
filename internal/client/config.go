@@ -16,7 +16,6 @@ type Config struct {
 	PSK                 string `json:"psk"`
 	Listen              string `json:"listen"`
 	TunnelPath          string `json:"tunnel_path"`
-	Insecure            bool   `json:"insecure"`
 	Fingerprint         string `json:"fingerprint"`          // "randomized" (default), "chrome", "firefox", "safari"
 	ShapingMode         string `json:"shaping_mode"`         // "", "stream", "balanced", "stealth"
 	LogLevel            string `json:"log_level"`            // "debug", "info" (default), "warn", "error"

@@ -55,7 +55,7 @@ func main() {
 
 	// Tunnel handler on tunnel_path, everything else goes to reverse proxy
 	mux := http.NewServeMux()
-	tunnelHandler := server.TunnelHandler(psk, validator, proxy, pm, agg)
+	tunnelHandler := server.TunnelHandler(psk, validator, server.DefaultDestACL{}, proxy, pm, agg)
 	mux.Handle(cfg.TunnelPath, tunnelHandler)
 	if cfg.TunnelPath != "/" {
 		mux.Handle("/", proxy)

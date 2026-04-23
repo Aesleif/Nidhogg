@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net"
 
@@ -33,7 +34,8 @@ func FingerprintID(name string) (utls.ClientHelloID, error) {
 
 // DialTLS establishes a TLS connection using uTLS with the specified
 // fingerprint. The connection negotiates HTTP/2 via ALPN.
-func DialTLS(ctx context.Context, network, addr string, insecure bool, helloID utls.ClientHelloID) (net.Conn, error) {
+// rootCAs is the trust anchor set; nil uses system roots.
+func DialTLS(ctx context.Context, network, addr string, rootCAs *x509.CertPool, helloID utls.ClientHelloID) (net.Conn, error) {
 	dialer := net.Dialer{}
 	tcpConn, err := dialer.DialContext(ctx, network, addr)
 	if err != nil {
@@ -47,8 +49,8 @@ func DialTLS(ctx context.Context, network, addr string, insecure bool, helloID u
 	}
 
 	tlsConfig := &utls.Config{
-		ServerName:         host,
-		InsecureSkipVerify: insecure,
+		ServerName: host,
+		RootCAs:    rootCAs,
 	}
 
 	uConn := utls.UClient(tcpConn, tlsConfig, helloID)

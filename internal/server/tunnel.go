@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,7 +29,10 @@ const minSamplesForSnapshot = 10
 // The caller owns the validator's lifecycle — typically starts
 // validator.StartCleanupLoop on server ctx so stale nonces don't
 // accumulate during idle periods.
-func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, fallback http.Handler, pm *ProfileManager, agg *telemetry.Aggregator) http.Handler {
+// acl screens client-supplied destinations before dial; production
+// passes DefaultDestACL{} to block loopback/private/CGNAT/link-local/
+// multicast ranges. Tests pass NopDestChecker{}.
+func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, acl DestChecker, fallback http.Handler, pm *ProfileManager, agg *telemetry.Aggregator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			fallback.ServeHTTP(w, r)
@@ -82,12 +86,24 @@ func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, fallback
 		dest := d.Addr()
 		network := d.Network()
 
+		// Telemetry command is in-band authentication, no external dial.
+		// For tunnel commands, screen the destination before Dial. Resolve
+		// once here and Dial by the returned IP literal so DNS rebinding
+		// between check and Dial can't smuggle a private answer past ACL.
+		allowedIP, err := acl.ResolveAndCheck(r.Context(), d.Host)
+		if err != nil {
+			slog.Warn("tunnel: destination rejected", "host", d.Host, "err", err)
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
+		}
+		dialAddr := net.JoinHostPort(allowedIP.String(), strconv.Itoa(int(d.Port)))
+
 		// Connect to upstream target. Wrap in IdleConn so half-dead
 		// tunnels (silent peer + silent source) get force-closed instead
 		// of leaking goroutines and h2 stream buffers indefinitely.
 		// The closeOnce relay fix only fires when ONE side exits — idle
 		// timeout covers the case where BOTH sides are blocked on Read.
-		dialedUpstream, err := net.Dial(network, dest)
+		dialedUpstream, err := net.Dial(network, dialAddr)
 		if err != nil {
 			slog.Warn("tunnel: failed to dial upstream", "dest", dest, "err", err)
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
@@ -118,7 +134,6 @@ func TunnelHandler(psk []byte, validator *transport.HandshakeValidator, fallback
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("X-Nidhogg-Tunnel", "1")
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
@@ -303,7 +318,6 @@ func handleTelemetry(w http.ResponseWriter, reader io.Reader, pm *ProfileManager
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("X-Nidhogg-Tunnel", "1")
 	w.WriteHeader(http.StatusOK)
 
 	writeProfileResponse(w, pm, clientVersion)

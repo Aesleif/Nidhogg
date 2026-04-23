@@ -21,8 +21,7 @@ func TestLoadConfig_Full(t *testing.T) {
 		"server": "shop.example.com:443",
 		"psk": "secret-key",
 		"listen": "127.0.0.1:9090",
-		"tunnel_path": "/upload",
-		"insecure": true
+		"tunnel_path": "/upload"
 	}`)
 
 	cfg, err := LoadConfig(path)
@@ -41,9 +40,6 @@ func TestLoadConfig_Full(t *testing.T) {
 	if cfg.TunnelPath != "/upload" {
 		t.Errorf("TunnelPath = %q, want %q", cfg.TunnelPath, "/upload")
 	}
-	if !cfg.Insecure {
-		t.Error("Insecure = false, want true")
-	}
 }
 
 func TestLoadConfig_Defaults(t *testing.T) {
@@ -61,9 +57,6 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	}
 	if cfg.TunnelPath != "/" {
 		t.Errorf("TunnelPath = %q, want default %q", cfg.TunnelPath, "/")
-	}
-	if cfg.Insecure {
-		t.Error("Insecure should default to false")
 	}
 }
 
