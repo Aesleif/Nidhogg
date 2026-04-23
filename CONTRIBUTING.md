@@ -73,7 +73,7 @@ hours of uptime.
 
 Include:
 - Go version and OS
-- Config (redact PSK)
+- Config (always redact `private_key` on the client side; `authorized_keys` entries on the server are public by design, but you may want to strip the optional name labels if they identify users)
 - Full error log with `log_level: "debug"`
 - Steps to reproduce
 

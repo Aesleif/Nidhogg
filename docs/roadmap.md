@@ -47,9 +47,10 @@ are roughly ordered by priority.
   `cover_upstream` (real HTTPS site). Probers using arbitrary SNIs
   (`google.com`, etc.) see that site's real cert and handshake
   byte-for-byte
-- **`cover_upstream` doubles as HTTP-fallback target** — invalid-PSK
-  requests on the matching domain are reverse-proxied to the same site,
-  giving probers a probe-consistent picture across vectors
+- **`cover_upstream` doubles as HTTP-fallback target** — tunnel POSTs
+  that fail Ed25519 auth on the matching domain are reverse-proxied to
+  the same site, giving probers a probe-consistent picture across
+  vectors
 
 ### Observability
 - `net/http/pprof` endpoints on loopback (`:6060` server, `:6061` client)
@@ -69,7 +70,7 @@ that target our specific domain still hit the regular nidhogg path:
 they see Go's `crypto/tls` ServerHello (cipher and extension order
 distinguishable from nginx/cloudflare) and our Let's Encrypt cert.
 
-- [ ] **Reality-style cert mux** — embed a PSK signature in the
+- [ ] **Reality-style cert mux** — embed an Ed25519 proof in the
   ClientHello (e.g., session ticket field) so the server can decide
   pre-handshake whether to terminate TLS locally or proxy the entire
   TLS handshake (raw bytes) to the cover upstream
@@ -78,16 +79,20 @@ distinguishable from nginx/cloudflare) and our Let's Encrypt cert.
 - [ ] Document the upstream-selection trade-offs (cover site
   availability, latency, bandwidth amplification risk)
 
-### Multi-PSK / per-user authentication
+### Per-client authentication (done; follow-up items remain)
 
-Today all clients share one PSK. Compromise of one client invalidates all.
+Done — each client has its own Ed25519 keypair. `server.json`'s
+`authorized_keys` array identifies each registered client (optionally
+with a human-readable name). Revocation = remove the line + restart.
+Compromise of one client's private key affects only that client.
 
-- [ ] Server config takes a list of `{user_id, psk}` pairs (or UUID-style
-  keys)
-- [ ] Handshake includes a user identifier so the server validates against
-  the right key
-- [ ] Hot-reload: add/revoke users without restarting the server
-- [ ] Per-user telemetry and rate limiting hooks
+Remaining:
+
+- [ ] Hot-reload `authorized_keys` via SIGHUP so adding/revoking a
+  client does not require a server restart
+- [ ] Per-client telemetry aggregation keyed by the pubkey label
+- [ ] Per-client rate limiting hooks (see "Server-side rate limiting"
+  below)
 
 ### TLS server fingerprint masking
 
@@ -103,7 +108,7 @@ itself), JA3S currently identifies it as Go.
 ### Server-side rate limiting
 
 - [ ] Limit handshake attempts per source IP (e.g. 10/sec)
-- [ ] Defends against active-probe spam, brute-force PSK attempts
+- [ ] Defends against active-probe spam and stolen-key abuse
 - [ ] Should be configurable so legitimate NAT'd users aren't blocked
 
 ### Wire-protocol specification + external review
@@ -151,11 +156,14 @@ itself), JA3S currently identifies it as Go.
 
 ## Future ideas
 
-- **PSK rotation announcement** — server pushes new PSK in profile delivery
-  payload; old PSK valid for grace period
+- **Key rotation tooling** — `nidhogg-keygen rotate` that generates a
+  new keypair on the client, advertises the new pubkey to the server
+  via the existing tunnel, and phases out the old entry once a grace
+  period elapses
 - **HTTP/3 (QUIC) transport** — would solve TCP head-of-line blocking
   cleanly, but UDP/443 is heavily blocked in Russia, so not a priority
-- **Hot-reload server config** without restart (profile targets, PSK list)
+- **Hot-reload server config** without restart (profile targets,
+  `authorized_keys`)
 - **Web UI** for server management (status, active connections, bandwidth)
 - **Multi-server failover** in the client (geo-distributed gateway pool)
 - **Pluggable transport** spec compliance (Tor's `pt_2.1`) — would let

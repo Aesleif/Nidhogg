@@ -264,7 +264,7 @@ TCP :443 listener
   |
   v  peek ClientHello (TLS record header → full record)
   |
-  +-- SNI == config.domain  -> tls.Server with our cert → http.Server (PSK or HTTP fallback)
+  +-- SNI == config.domain  -> tls.Server with our cert → http.Server (Ed25519 auth or HTTP fallback)
   +-- ALPN includes "acme-tls/1"  -> same TLS path; autocert handles the challenge
   +-- otherwise              -> raw-TCP forward to config.cover_upstream
 ```
@@ -278,8 +278,10 @@ real cert and a valid TLS handshake byte-for-byte.
 
 **`cover_upstream` is dual-purpose** (`host:port` format):
 - Pre-TLS: raw forward target for SNI mismatch (this section)
-- Post-TLS: HTTP reverse proxy target for invalid-PSK requests
-  (existing fallback, see `internal/server/proxy.go`)
+- Post-TLS: HTTP reverse proxy target for tunnel POSTs whose client
+  hello fails Ed25519 authentication — bad version byte or a public
+  key not in `authorized_keys` (see `internal/server/proxy.go` and
+  `internal/server/tunnel.go`)
 
 This gives a probe-consistent picture: from any vector — random SNI
 scan, HTTP probe to our domain — the server returns content for the
@@ -401,12 +403,14 @@ caps so the process can run for weeks under sustained load:
   10K samples is far more than profile generation needs (CDFs are stable
   with hundreds), and the cap protects against multi-hour tunnels to
   profile-target hosts piling up `PacketSample` structs.
-- **`internal/transport/handshake.go`** — `HandshakeValidator.nonces` is
-  hard-capped at `nonceRingSize` (10,000). When the time-based sweep
-  (`< now - 2*maxClockSkew`) cannot shrink the map (because every entry is
-  fresh under sustained load), arbitrary entries are dropped down to the
-  cap. Trade-off: a brief replay window for the evicted entries; see
-  [SECURITY.md](../SECURITY.md) for the analysis.
+- **`internal/transport/authstore.go`** — the auth store holds the set
+  of authorized Ed25519 public keys. Memory cost is bounded by the
+  config: `len(authorized_keys) × (32-byte pubkey + string label) +
+  map overhead` — kilobytes for any realistic deployment. The Ed25519
+  handshake itself keeps no server-side state across connections: the
+  32-byte challenge nonce is generated per-connection and lives only
+  for the duration of its HTTP/2 stream, so there is no nonce cache or
+  replay window to manage.
 - **`internal/transport/idle.go`** — `IdleConn` bounds tunnel lifetime
   by activity. Tunnels stuck on silent peers no longer leak goroutines
   and 64 KiB h2 scratch buffers indefinitely; see "Tunnel idle timeout"

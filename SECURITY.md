@@ -23,27 +23,30 @@ If you discover a security vulnerability, please report it responsibly:
 
 - **Passive DPI:** Traffic shaping makes tunneled connections statistically similar to real HTTPS browsing (CDF-based packet sizing, optional burst pattern emulation, optional inter-packet timing delays)
 - **TLS client fingerprinting:** uTLS randomizes ClientHello to match real browsers (Chrome, Firefox, Safari)
-- **Unauthorized tunnel access:** PSK authentication via HMAC-SHA256 (57-byte handshake marker including version, timestamp, random nonce, MAC)
-- **Replay attacks (within bounds):** Nonce ring with timestamp window (±60s clock skew). Hard-capped at 10K entries to prevent unbounded memory; see weaknesses below for the trade-off.
+- **Unauthorized tunnel access:** Ed25519 challenge-response authentication. The client sends `[version:1][pubkey:32]`; the server returns a fresh 32-byte `crypto/rand` nonce; the client signs `"nidhogg-auth-v2\x00" || nonce` with its private key; the server verifies against the public key looked up in `authorized_keys`. Replay is impossible because the nonce is unique per connection.
+- **Client revocation:** each client has its own Ed25519 keypair. Removing the corresponding line from `authorized_keys` and restarting the server blocks that client immediately without affecting the others.
+- **Server-compromise damage scope:** an attacker who gains root on the server reads the `authorized_keys` list. These are public keys by design — they cannot be used to impersonate any client because the matching private keys never leave the client machines. No shared secret exists that, if leaked, would unlock every client.
 - **IP-range scanners with arbitrary SNIs (partial):** The standalone server peeks every TLS ClientHello and raw-TCP-forwards connections whose SNI doesn't match `cover_upstream`'s configured domain to a real HTTPS site. Probes targeting `google.com`, `cloudflare.com`, etc. on our IP get that site's actual certificate and TLS handshake. Targeted probes that use our specific domain bypass this — they still hit the regular nidhogg path (see weaknesses below).
+- **Destination abuse from authenticated clients:** the server's ACL rejects tunnel destinations that resolve to loopback, RFC 1918, CGNAT, link-local, or multicast addresses before `net.Dial`, and dials by the resolved IP literal to prevent DNS-rebinding between check and dial.
 
 ### What Nidhogg does NOT protect against
 
 - **Active probing fingerprint:** The TLS handshake is performed by Go's `crypto/tls`, whose cipher and extension order differs from nginx, Cloudflare, or popular CDNs. A determined active prober (e.g. ZGrab2 + JA3S classifier) can distinguish "this is a Go HTTP server pretending to be a website" from a genuine origin. VLESS-Reality avoids this by SNI-multiplexing the TLS handshake to a real upstream site; Nidhogg currently does not.
 - **Long-lived HTTP/2 connection pattern:** A handful of long-lived TCP connections each carrying thousands of multiplexed streams is atypical browser behavior. Stateful DPI may flag this as anomalous.
-- **Replay window after hard-cap eviction:** When the nonce map exceeds 10K entries under sustained load, arbitrary fresh entries are dropped to keep memory bounded. This opens a ~60-second window where evicted-but-still-fresh nonces could be replayed. Acceptable trade-off vs unbounded growth, but weaker than a pure LRU.
 - **Endpoint compromise:** If the server or client machine is compromised, all traffic is exposed.
+- **Client private-key theft:** if an attacker steals a client's `private_key`, they can impersonate that specific client until the pubkey is removed from `authorized_keys`. Only one client is affected; there is no shared secret that cascades to others.
+- **Auth-layer forward secrecy:** Ed25519 signatures are not forward-secret in the sense that a stolen private key lets the attacker authenticate from any point forward. Rotate via `nidhogg-keygen` + `authorized_keys` edit. TLS ECDHE still provides forward secrecy on the data channel.
 - **Traffic correlation:** An adversary observing both ends of the tunnel can correlate connections by volume and timing despite shaping.
-- **Multi-user key isolation:** All clients share a single PSK; compromising one client exposes the key for all. No per-user authentication exists yet.
-- **Auth-layer forward secrecy:** PSK + HMAC has no forward secrecy. If the PSK leaks, all future handshakes from any client can be forged. (TLS gives FS on the data channel via ECDHE, but that protects the bytes, not the auth.)
 - **No third-party crypto / security audit:** Single-author project, no external review. Absence of known issues is not evidence of safety.
-- **Server bandwidth amplification via reverse proxy fallback:** A bogus handshake forwards the request to the configured reverse-proxy upstream. Picking a heavy upstream means an attacker can use Nidhogg as a free request relay — pick a static cover site.
-- **Local pprof endpoint exposure:** The standalone server and client bind `net/http/pprof` to `127.0.0.1:6060` / `:6061` for diagnostics. The loopback bind is the security boundary — there is no auth. On a multi-tenant box, any other local user or process able to connect to `127.0.0.1` can pull heap dumps, which contain whatever was in process memory at the time (including the PSK after it was loaded). Mitigation: deploy on single-tenant boxes only, gate the port with a host firewall, or build with the pprof block removed for production binaries.
+- **Server bandwidth amplification via reverse proxy fallback:** A handshake that fails authentication forwards the request to the configured reverse-proxy upstream. Picking a heavy upstream means an attacker can use Nidhogg as a free request relay — pick a static cover site.
+- **No server-side rate limiting on the tunnel path:** a remote peer that already has a valid client private key (or a valid authorized pubkey that can reach the challenge phase) is not throttled. A stolen key used to pound the server is mitigated only by removing the pubkey.
+- **Local pprof endpoint exposure:** The standalone server and client bind `net/http/pprof` to `127.0.0.1:6060` / `:6061` for diagnostics. The loopback bind is the security boundary — there is no auth. On a multi-tenant box, any other local user or process able to connect to `127.0.0.1` can pull heap dumps, which contain whatever was in process memory at the time (client: its Ed25519 private key; server: the `authorized_keys` list, which is public by design but still identifies your users). Mitigation: deploy on single-tenant boxes only, gate the port with a host firewall, or build with the pprof block removed for production binaries.
 
 ### Known limitations
 
 - **Not a VPN** &mdash; Standalone Nidhogg is a SOCKS5 proxy. When integrated with Xray-core, it can work as a system-wide transparent proxy (tproxy), but this depends on the framework configuration.
-- **Single PSK** &mdash; All clients authenticate with the same key. There is no per-user authentication or access control. Multi-PSK / per-user UUID auth is on the [roadmap](docs/roadmap.md).
+- **No hot-reload of `authorized_keys`** &mdash; adding or revoking a client requires a server restart. Hot-reload via SIGHUP is on the [roadmap](docs/roadmap.md).
+- **No per-client rate-limiting** &mdash; the server treats all authenticated clients equally. Planned.
 - **Profile quality** &mdash; Traffic shaping effectiveness depends on how closely the profile targets match real browsing patterns. Poor target selection reduces evasion quality.
 
 ## Threat model

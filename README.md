@@ -14,7 +14,7 @@ Nidhogg tunnels network traffic through an HTTPS reverse proxy using HTTP/2 POST
 - HTTP/2 POST streaming tunnel over TLS with multi-connection client pool and periodic connection recycling
 - Adaptive traffic shaping from real HTTPS profiles (CDF-based packet sizing and timing)
 - uTLS fingerprint randomization (Chrome, Firefox, Safari, or random)
-- PSK-authenticated handshake (HMAC-SHA256 with replay-protected nonce)
+- Ed25519 challenge-response handshake (server-issued nonce, per-client keypairs, `authorized_keys` list on the server)
 - Automatic profile rotation on connection degradation
 - UDP over TCP (UoT) -- tunnel UDP datagrams (QUIC, DNS) through the TCP tunnel
 - Per-connection health monitoring with server telemetry feedback
@@ -33,8 +33,10 @@ sequenceDiagram
     participant Target as Destination
 
     App->>Client: SOCKS5 CONNECT / UDP ASSOCIATE host:port
-    Client->>Server: HTTP/2 POST [handshake + dest + version + shaping_mode]
-    Server-->>Client: 200 OK + [version + size + profile JSON]
+    Client->>Server: HTTP/2 POST [version + pubkey]
+    Server-->>Client: 200 OK + [32B challenge nonce]
+    Client->>Server: [signature + dest + known profile version + shaping_mode]
+    Server-->>Client: [profile version + size + profile JSON]
 
     loop Shaped relay
         App->>Client: plaintext data
@@ -63,7 +65,32 @@ sequenceDiagram
 ```bash
 go build -o nidhogg-server ./cmd/nidhogg-server
 go build -o nidhogg-client ./cmd/nidhogg-client
+go build -o nidhogg-keygen ./cmd/nidhogg-keygen
 ```
+
+### Generating keys
+
+Each client has its own Ed25519 keypair. The private key lives in
+`client.json`; the public key is registered in `server.json`'s
+`authorized_keys` list. `nidhogg-keygen` prints both to stdout so you
+copy-paste them — the private key is never written to disk.
+
+```bash
+$ ./nidhogg-keygen -name alice-laptop
+# Paste into client.json under "private_key":
+LDzu2yzSW27r4t36ablmEeqBLurB0YVp078hmCygU91iNIq74x1cjd2aXZd3wnwc+UlAxQl2NVxMM0FYhzdYeQ==
+
+# Paste into server.json "authorized_keys" array:
+YjSKu+MdXI3dml2Xd8J8HPlJQMUJdjVcTDNBWIc3WHk= alice-laptop
+```
+
+The `-name` flag appends an optional label for operator-side log output
+(it is never sent over the wire). Add `-json` for machine-readable
+output suitable for Ansible / Terraform.
+
+To revoke a client, remove its line from `authorized_keys` and restart
+the server. To add a new client, generate a fresh keypair and append
+the public entry.
 
 ### Server setup
 
@@ -73,7 +100,9 @@ Create `config.json`:
 {
   "listen": ":443",
   "domain": "your-domain.com",
-  "psk": "your-secret-key",
+  "authorized_keys": [
+    "YjSKu+MdXI3dml2Xd8J8HPlJQMUJdjVcTDNBWIc3WHk= alice-laptop"
+  ],
   "cover_upstream": "www.microsoft.com:443",
   "profile_targets": ["google.com"],
   "log_level": "info"
@@ -88,10 +117,10 @@ The server obtains a TLS certificate via Let's Encrypt automatically. For manual
 
 The `cover_upstream` setting is dual-purpose: connections whose TLS SNI
 doesn't match `domain` are raw-TCP-forwarded to the cover site (probers
-see that site's real cert and TLS handshake byte-for-byte), and HTTP
-requests on the matching domain that fail PSK validation are reverse-
-proxied to the same site. Pick a stable, unrelated HTTPS site
-(`www.microsoft.com:443`, `cdn.cloudflare.com:443`, etc.).
+see that site's real cert and TLS handshake byte-for-byte), and
+tunnel POSTs from clients whose public key is not in `authorized_keys`
+are reverse-proxied to the same site. Pick a stable, unrelated HTTPS
+site (`www.microsoft.com:443`, `cdn.cloudflare.com:443`, etc.).
 
 ### Client setup
 
@@ -100,7 +129,7 @@ Create `client.json`:
 ```json
 {
   "server": "your-domain.com:443",
-  "psk": "your-secret-key",
+  "private_key": "LDzu2yzSW27r4t36ablmEeqBLurB0YVp078hmCygU91iNIq74x1cjd2aXZd3wnwc+UlAxQl2NVxMM0FYhzdYeQ==",
   "listen": "127.0.0.1:1080",
   "shaping_mode": "balanced",
   "log_level": "info"
@@ -121,8 +150,8 @@ Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 |-------|------|---------|-------------|
 | `listen` | string | `":443"` | Listen address |
 | `domain` | string | required* | Domain for Let's Encrypt |
-| `psk` | string | required | Pre-shared key for tunnel authentication |
-| `cover_upstream` | string | required | Real HTTPS site as `host:port`. Used as raw-TCP forward target for non-matching SNIs (defeats IP-range scanners) and as HTTP fallback target when PSK validation fails |
+| `authorized_keys` | []string | required | List of Ed25519 public keys authorized to open tunnels. Each entry is `"<base64-pubkey>"` or `"<base64-pubkey> <name>"`; the optional name appears only in server logs |
+| `cover_upstream` | string | required | Real HTTPS site as `host:port`. Used as raw-TCP forward target for non-matching SNIs (defeats IP-range scanners) and as HTTP fallback target when the Ed25519 handshake rejects the client |
 | `tunnel_path` | string | `"/"` | HTTP path for tunnel endpoint |
 | `cert_file` | string | | TLS certificate file (alternative to Let's Encrypt) |
 | `key_file` | string | | TLS private key file |
@@ -139,10 +168,9 @@ Configure your browser or application to use `127.0.0.1:1080` as a SOCKS5 proxy.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `server` | string | required | Server address (host:port) |
-| `psk` | string | required | Pre-shared key (must match server) |
+| `private_key` | string | required | Base64-encoded 64-byte Ed25519 private key. Generate with `nidhogg-keygen`; the corresponding public key must be in the server's `authorized_keys` |
 | `listen` | string | `"127.0.0.1:1080"` | SOCKS5 proxy listen address |
 | `tunnel_path` | string | `"/"` | Tunnel endpoint path (must match server) |
-| `insecure` | bool | `false` | Skip TLS certificate verification |
 | `fingerprint` | string | `"randomized"` | TLS fingerprint: randomized, chrome, firefox, safari |
 | `shaping_mode` | string | `""` | Traffic shaping mode (see below) |
 | `log_level` | string | `"info"` | Log level: debug, info, warn, error |
@@ -168,7 +196,7 @@ Nidhogg is organized into focused internal packages:
 
 | Package | Purpose |
 |---------|---------|
-| `transport` | TLS dialing with uTLS, PSK handshake generation/validation |
+| `transport` | TLS dialing with uTLS, Ed25519 handshake primitives, authorized-keys store |
 | `client` | Dialer with HTTP/2 connection pool, profile cache |
 | `server` | Tunnel handler, reverse proxy fallback, profile manager |
 | `shaper` | Traffic shaping: frame encoding, CDF sampling, burst emulation |
@@ -197,7 +225,7 @@ shaping when the active profile and the client's `shaping_mode` agree.
 
 ## Roadmap
 
-See [docs/roadmap.md](docs/roadmap.md) for what's done, what's coming next (active probing hardening, multi-PSK auth, sing-box integration, release engineering), and longer-term ideas.
+See [docs/roadmap.md](docs/roadmap.md) for what's done, what's coming next (active probing hardening, per-client rate-limiting, hot-reload of `authorized_keys`, sing-box integration, release engineering), and longer-term ideas.
 
 ## Security
 
