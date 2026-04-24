@@ -221,6 +221,116 @@ func TestTunnelClosesUpstreamWhenClientDisconnects(t *testing.T) {
 	}
 }
 
+// TestTunnelClosesTunnelWhenUpstreamExits covers the inverse of the
+// client-disconnect leak: when the upstream closes first and the client
+// goes silent, the relay's client→upstream goroutine used to stay
+// pinned in r.Body.Read forever because closeUpstream only closed the
+// upstream side. With the fix, closeBoth also drops the h2 request-body
+// read deadline so both directions unblock and the handler returns.
+// Covers the raw branch (no profile / shaping disabled).
+func TestTunnelClosesTunnelWhenUpstreamExits(t *testing.T) {
+	pub, priv := testKeypair(t)
+
+	// Upstream accepts then immediately closes — upstream→client
+	// relay goroutine on the server sees io.EOF and exits. Without
+	// the fix, client→upstream is stuck reading a silent tunnel.
+	closingLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closingLn.Close()
+
+	go func() {
+		for {
+			conn, err := closingLn.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	srv := startTunnelServer(t, pub)
+	dialer := newTestDialer(t, srv, priv)
+
+	conn, _, _, err := dialer.DialTunnel(context.Background(), closingLn.Addr().String())
+	if err != nil {
+		t.Fatalf("DialTunnel: %v", err)
+	}
+	defer conn.Close()
+
+	// Client stays silent. With the fix, the server handler returns
+	// quickly and the h2 stream closes → client's Read returns EOF.
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 16)
+		_, err := conn.Read(buf)
+		readDone <- err
+	}()
+
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("Read returned nil, expected EOF/error after upstream close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read hung — server relay goroutine leaked on silent tunnel side")
+	}
+}
+
+// TestTunnelClosesTunnelWhenUpstreamExitsShaped covers the same leak as
+// TestTunnelClosesTunnelWhenUpstreamExits but through the shaped branch
+// (server has an active profile and client signals shaping). The
+// ShapedConn wraps the tunnel body, so closeBoth must propagate via the
+// conn's Close() all the way down to the h2 request-body deadline.
+func TestTunnelClosesTunnelWhenUpstreamExitsShaped(t *testing.T) {
+	pub, priv := testKeypair(t)
+
+	closingLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closingLn.Close()
+
+	go func() {
+		for {
+			conn, err := closingLn.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	pm := server.NewProfileManager([]string{"test"}, time.Hour, 20)
+	pm.Push(makeTestProfile())
+
+	srv := startTunnelServerWithPM(t, pub, pm)
+	dialer := newTestDialerWithShaping(t, srv, priv, shaper.Balanced)
+
+	conn, _, _, err := dialer.DialTunnel(context.Background(), closingLn.Addr().String())
+	if err != nil {
+		t.Fatalf("DialTunnel: %v", err)
+	}
+	defer conn.Close()
+
+	readDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 16)
+		_, err := conn.Read(buf)
+		readDone <- err
+	}()
+
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("Read returned nil, expected EOF/error after upstream close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read hung — shaped-branch relay goroutine leaked on silent tunnel side")
+	}
+}
+
 // TestTunnelEchoShapedSecondCall covers the regression where the dialer
 // dropped the parsed profile on the second call (server skipped JSON via
 // version cache → prof returned nil → client unwrapped ShapedConn while

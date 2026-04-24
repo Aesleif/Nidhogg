@@ -92,10 +92,18 @@ func RelayUDP(ctx context.Context, udpConn net.Conn, stream io.ReadWriter) error
 		}
 	}()
 
-	// Wait for context cancellation to close connections
+	// Wait for context cancellation to close connections.
+	// Close BOTH sides so whichever goroutine is blocked — on
+	// udpConn.Read or on ReadPacket(stream) — gets unblocked. Closing
+	// only udpConn leaves a blocked stream reader pinned when the stream
+	// implementation is a no-op-Close-by-default shim (e.g. the server's
+	// h2 tunnel conn before fixing its Close()).
 	go func() {
 		<-ctx.Done()
 		udpConn.Close()
+		if closer, ok := stream.(io.Closer); ok {
+			_ = closer.Close()
+		}
 	}()
 
 	wg.Wait()

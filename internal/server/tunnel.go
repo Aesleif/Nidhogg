@@ -20,7 +20,14 @@ import (
 	"github.com/aesleif/nidhogg/internal/udprelay"
 )
 
-const minSamplesForSnapshot = 10
+const (
+	minSamplesForSnapshot = 10
+	// telemetryReadTimeout bounds the tunnel body read during a
+	// CommandTelemetry request. An authenticated client that never
+	// finishes sending its JSON report used to hold the stream open
+	// indefinitely, leaking the h2 stream + goroutine.
+	telemetryReadTimeout = 15 * time.Second
+)
 
 // TunnelHandler creates an http.Handler that runs the Ed25519
 // challenge-response handshake and tunnels authenticated clients.
@@ -57,6 +64,12 @@ func TunnelHandler(auth *transport.AuthStore, acl DestChecker, fallback http.Han
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
+		// rc drives in-flight r.Body.Read / Write cancellation via
+		// SetReadDeadline / SetWriteDeadline. Used by closeBoth (below)
+		// to unblock whichever relay direction is still reading from the
+		// tunnel when its sibling exits — otherwise a silent client +
+		// dead upstream leaves the handler's Read pinned forever.
+		rc := http.NewResponseController(w)
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		nonce, err := transport.GenerateNonce()
@@ -106,7 +119,7 @@ func TunnelHandler(auth *transport.AuthStore, acl DestChecker, fallback http.Han
 		clientShaping := shaper.DecodeMode(shapingBuf[0]) != shaper.Disabled
 
 		if d.Command == transport.CommandTelemetry {
-			handleTelemetry(w, flusher, reader, pm, agg, clientVersion)
+			handleTelemetry(w, flusher, rc, reader, pm, agg, clientVersion)
 			return
 		}
 
@@ -158,29 +171,36 @@ func TunnelHandler(auth *transport.AuthStore, acl DestChecker, fallback http.Han
 		activeProfile, _ := writeProfileResponse(w, pm, clientVersion)
 		flusher.Flush()
 
-		// UDP relay: frame datagrams without shaping
-		if network == "udp" {
-			tc := &serverTunnelConn{reader: reader, writer: w, flusher: flusher}
-			udprelay.RelayUDP(r.Context(), upstream, tc)
-			return
+		tc := &serverTunnelConn{reader: reader, writer: w, flusher: flusher, rc: rc}
+
+		// closeBoth tears down the upstream TCP socket AND the tunnel
+		// (via rc.SetReadDeadline) so whichever relay direction is still
+		// blocked on a Read — upstream OR tunnel body — gets unstuck and
+		// exits. Before this was symmetric, closing only the upstream
+		// left `io.Copy(upstream, shaped)` pinned in r.Body.Read forever
+		// whenever the upstream was the first to EOF and the client was
+		// temporarily silent (websocket idle / MTProto long-poll).
+		var closeOnce sync.Once
+		closeBoth := func() {
+			closeOnce.Do(func() {
+				tcpUpstream.Close()
+				tc.Close() // SetReadDeadline(now) on the h2 request body
+			})
 		}
 
-		// closeUpstream fully tears down the upstream TCP socket so that
-		// whichever relay goroutine is blocked on a Read from it gets
-		// unstuck and exits. Without this, an idle-but-alive upstream
-		// (websocket, MTProto long-poll) leaves the response goroutine
-		// hung forever after the client disconnects, wedging wg.Wait()
-		// and leaking the TCP socket + frame buffers.
-		var closeOnce sync.Once
-		closeUpstream := func() {
-			closeOnce.Do(func() { tcpUpstream.Close() })
+		// UDP relay: frame datagrams without shaping. RelayUDP's own
+		// ctx.Done watchdog closes udpConn; closeBoth after return closes
+		// the tunnel side so the stream-reading goroutine also unblocks.
+		if network == "udp" {
+			defer closeBoth()
+			udprelay.RelayUDP(r.Context(), upstream, tc)
+			return
 		}
 
 		// If we have a profile AND the client signaled it will frame, wrap
 		// the relay in ShapedConn (both directions). Server uses Stream mode
 		// — padding only, no artificial delays.
 		if activeProfile != nil && clientShaping {
-			tc := &serverTunnelConn{reader: reader, writer: w, flusher: flusher}
 			shaped := shaper.NewShapedConn(tc, activeProfile, shaper.Stream)
 
 			var wg sync.WaitGroup
@@ -188,13 +208,13 @@ func TunnelHandler(auth *transport.AuthStore, acl DestChecker, fallback http.Han
 
 			go func() {
 				defer wg.Done()
-				defer closeUpstream()
+				defer closeBoth()
 				io.Copy(upstream, shaped)
 			}()
 
 			go func() {
 				defer wg.Done()
-				defer closeUpstream()
+				defer closeBoth()
 				io.Copy(shaped, upstream)
 			}()
 
@@ -206,13 +226,13 @@ func TunnelHandler(auth *transport.AuthStore, acl DestChecker, fallback http.Han
 
 			go func() {
 				defer wg.Done()
-				defer closeUpstream()
+				defer closeBoth()
 				io.Copy(upstream, reader)
 			}()
 
 			go func() {
 				defer wg.Done()
-				defer closeUpstream()
+				defer closeBoth()
 				buf := make([]byte, 32*1024)
 				for {
 					n, readErr := upstream.Read(buf)
@@ -248,10 +268,18 @@ func TunnelHandler(auth *transport.AuthStore, acl DestChecker, fallback http.Han
 
 // serverTunnelConn adapts (reader, ResponseWriter) to net.Conn
 // so ShapedConn can wrap the server side of the tunnel.
+//
+// Close / SetReadDeadline / SetWriteDeadline delegate to the
+// http.ResponseController so callers can force-unblock an in-flight
+// r.Body.Read or w.Write on the h2 stream.
 type serverTunnelConn struct {
 	reader  io.Reader
 	writer  io.Writer
 	flusher http.Flusher
+	rc      *http.ResponseController
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (c *serverTunnelConn) Read(b []byte) (int, error) { return c.reader.Read(b) }
@@ -264,12 +292,48 @@ func (c *serverTunnelConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func (c *serverTunnelConn) Close() error                       { return nil }
-func (c *serverTunnelConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
-func (c *serverTunnelConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
-func (c *serverTunnelConn) SetDeadline(_ time.Time) error      { return nil }
-func (c *serverTunnelConn) SetReadDeadline(_ time.Time) error  { return nil }
-func (c *serverTunnelConn) SetWriteDeadline(_ time.Time) error { return nil }
+// Close drops any in-flight read/write on the tunnel body by pushing
+// both deadlines to now. Idempotent.
+func (c *serverTunnelConn) Close() error {
+	c.closeOnce.Do(func() {
+		if c.rc == nil {
+			return
+		}
+		now := time.Now()
+		if err := c.rc.SetReadDeadline(now); err != nil {
+			c.closeErr = err
+		}
+		// Best-effort on the write side: if a Write is pinned on h2 flow
+		// control we want to unblock it too; record only the read-side
+		// error if both fail.
+		_ = c.rc.SetWriteDeadline(now)
+	})
+	return c.closeErr
+}
+
+func (c *serverTunnelConn) LocalAddr() net.Addr  { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (c *serverTunnelConn) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+
+func (c *serverTunnelConn) SetDeadline(t time.Time) error {
+	if err := c.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return c.SetWriteDeadline(t)
+}
+
+func (c *serverTunnelConn) SetReadDeadline(t time.Time) error {
+	if c.rc == nil {
+		return nil
+	}
+	return c.rc.SetReadDeadline(t)
+}
+
+func (c *serverTunnelConn) SetWriteDeadline(t time.Time) error {
+	if c.rc == nil {
+		return nil
+	}
+	return c.rc.SetWriteDeadline(t)
+}
 
 // writeProfileResponse writes [version:4B][size:4B][json?] to w.
 // If clientVersion matches the current profile, size=0 and json is omitted.
@@ -317,7 +381,15 @@ func writeProfileResponse(w io.Writer, pm *ProfileManager, clientVersion uint32)
 // response headers and the authentication nonce have already been sent.
 // It just reads the client's JSON report, forwards it to the aggregator,
 // and appends the inline profile payload.
-func handleTelemetry(w http.ResponseWriter, flusher http.Flusher, reader io.Reader, pm *ProfileManager, agg *telemetry.Aggregator, clientVersion uint32) {
+//
+// The tunnel body read is bounded by telemetryReadTimeout so a slow /
+// malicious authenticated client cannot hold the h2 stream open forever
+// mid-Decode.
+func handleTelemetry(w http.ResponseWriter, flusher http.Flusher, rc *http.ResponseController, reader io.Reader, pm *ProfileManager, agg *telemetry.Aggregator, clientVersion uint32) {
+	if rc != nil {
+		_ = rc.SetReadDeadline(time.Now().Add(telemetryReadTimeout))
+		defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
+	}
 	var report telemetry.Report
 	if err := json.NewDecoder(reader).Decode(&report); err != nil {
 		slog.Warn("tunnel: invalid telemetry", "err", err)
